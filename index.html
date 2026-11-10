@@ -41,7 +41,10 @@ button.primary{background:var(--accent);color:#fff;font-weight:700}
   animation:pop .18s ease-out} /* стартует с видимого состояния, не с opacity:0 (§9) */
 @keyframes pop{from{transform:scale(.96)}to{transform:scale(1)}}
 .card h2{margin:0 0 8px} .card p{color:var(--muted);margin:0 0 16px}
-.card .stars{font-size:34px;color:var(--c2);letter-spacing:4px;margin:0 0 6px}
+.card .stars{font-size:44px;color:var(--c2);letter-spacing:6px;margin:0 0 6px}
+.card .st{display:inline-block;animation:starIn .5s cubic-bezier(.3,1.7,.5,1) both;text-shadow:0 3px 0 rgba(160,100,0,.25)}
+.card .st.off{color:var(--off);text-shadow:none}
+@keyframes starIn{from{transform:scale(2) rotate(-50deg)}to{transform:scale(1) rotate(0)}}  /* старт с видимого состояния (§9) */
 .card .row{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
 .levels{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:14px 0 4px}
 .levels button{padding:8px 0;font-size:14px}
@@ -49,7 +52,7 @@ button.primary{background:var(--accent);color:#fff;font-weight:700}
 #toast{position:absolute;left:50%;bottom:90px;transform:translateX(-50%);background:var(--ink);color:var(--frame);padding:8px 14px;border-radius:10px;
   pointer-events:none;opacity:.95;transition:opacity .25s;white-space:nowrap}
 #toast.hide{opacity:0}
-@media (prefers-reduced-motion: reduce){ .card{animation:none} #toast{transition:none} }
+@media (prefers-reduced-motion: reduce){ .card, .card .st{animation:none} #toast{transition:none} }
 </style>
 </head>
 <body>
@@ -95,6 +98,22 @@ const CFG = {
   SWIPE_PX: 14,        // порог свайпа в экранных px; короче — тап (плитка вздрагивает)
   UNDO_PER_LEVEL: 3,   // отмен на уровень: раздача делает бесконечную отмену читом
   TOAST_MS: 1600,      // сколько висит тост
+  // --- сочность (только оболочка; на правила не влияют) ---
+  SHAKE_PX: 4,         // амплитуда встряски экрана на «щёлк» (растёт с серией до SHAKE_MAX)
+  SHAKE_MAX: 9,        // потолок встряски
+  SHAKE_MS: 240,       // длительность встряски
+  LAND_MS: 190,        // сплющивание плитки при остановке
+  HIT_MS: 210,         // вздрагивание плитки/камня, в которые упёрлись
+  TRAIL_N: 3,          // сколько призраков шлейфа за скользящей плиткой
+  PRAISE_MS: 950,      // сколько живёт надпись «Щёлк!» / «Отлично! ×2»
+  CONFETTI_DOCK: 18,   // конфетти на одну стыковку
+  CONFETTI_WIN: 80,    // конфетти на победу
+  WIN_HOLD_MS: 1100,   // сколько празднуем на поле до карточки победы
+  INTRO_MS: 260,       // впрыгивание одной плитки на старте уровня (задержка по диагонали INTRO_STEP)
+  INTRO_STEP: 38,      // мс задержки на клетку диагонали
+  IDLE_HINT_MS: 5000,  // бездействие, после которого подмигивает плитка с готовой стыковкой
+  DANGER_EMPTY: 4,     // пустых клеток не больше — рамка поля тревожно пульсирует
+  DRAG_PULL: 0.16,     // насколько плитка тянется за пальцем (доля клетки)
 };
 
 const STONE = -1;
@@ -406,6 +425,13 @@ const G = {
   merges: [],                    // [{ lCell, rCell, active, color, tShow, t0, t1, flyEnd, slot }]
   parts: [],                     // частицы { x, y, vx, vy, t0, life, color, r }
   wiggle: null,                  // { cell, dir, t0, t1 } — вздрагивание плитки (тап или упор)
+  land: null,                    // { cell, dir, t0, t1 } — сплющивание плитки при остановке
+  hit: null,                     // { cell, dir, t0, t1 } — вздрагивание того, во что упёрлись
+  shake: null,                   // { t0, t1, amp } — встряска экрана
+  praise: [],                    // всплывающие надписи { text, x, y, t0, t1, color, size }
+  combo: 0,                      // стыковок подряд (ход за ходом)
+  lastInputT: 0,                 // последний ввод — для подсказки при бездействии
+  hintFor: null, hintMove: -1,   // подсказка: для какого состояния посчитана и какой ход
   slotAt: [],                    // когда фигура долетит до слота копилки (мс performance.now)
   fxOpen: [],                    // открытые эффекты для журнала fx.end: { name, t1 }
   fxUntil: 0,                    // когда закончится последний эффект
@@ -447,17 +473,29 @@ const Audio = {
     src.connect(f).connect(g).connect(this.ac.destination); src.start(t); src.stop(e + 0.02);
   },
   swipe(ms){ this.hiss(Math.max(80, ms), 900, 2400, 0, 0.12); log('sound', 'swipe'); },
-  thunk(delay){ this.tone(170, 90, 'sine', delay, 0.3, 90); this.hiss(40, 600, 300, delay, 0.08); log('sound', 'thunk'); },
-  click(k, delay){                                   // «щёлк» стыковки: сухой клик + колокольчик выше с каждой фигурой
-    this.hiss(30, 5000, 3500, delay, 0.35, 'highpass');
-    this.tone(NOTES[Math.min(k, NOTES.length - 1)], 260, 'triangle', delay + 0.03, 0.22);
-    this.tone(NOTES[Math.min(k, NOTES.length - 1)] * 2, 180, 'sine', delay + 0.05, 0.08);
-    log('sound', 'click', 'k=' + k);
+  thunk(delay, dist){ const f = 200 - Math.min(5, dist || 1) * 14; this.tone(f, 100, 'sine', delay, 0.32, f * 0.5); this.hiss(50, 700, 250, delay, 0.1); log('sound', 'thunk'); },
+  click(k, delay, combo){                            // «щёлк» стыковки: сухой клик + аккорд, выше с каждой фигурой и серией
+    const f = NOTES[Math.min(k + Math.max(0, (combo || 1) - 1), NOTES.length - 1)];
+    this.hiss(30, 5000, 3500, delay, 0.4, 'highpass');
+    this.tone(f, 300, 'triangle', delay + 0.03, 0.22);
+    this.tone(f * 1.5, 260, 'sine', delay + 0.06, 0.1);
+    this.tone(f * 2, 200, 'sine', delay + 0.09, 0.07);
+    if ((combo || 1) >= 2) this.hiss(260, 6000, 9000, delay + 0.08, 0.06, 'highpass');   // искристый хвост серии
+    log('sound', 'click', 'k=' + k + ' combo=' + combo);
   },
+  coin(delay){ this.tone(1568, 60, 'square', delay, 0.04); this.tone(2093, 140, 'sine', delay + 0.04, 0.12); log('sound', 'slot'); },
+  star(i, delay){ const f = NOTES[2 + i * 2]; this.tone(f, 320, 'triangle', delay, 0.2); this.tone(f * 2, 240, 'sine', delay + 0.02, 0.08); log('sound', 'star', 'i=' + i); },
+  fanfare(delay){
+    [523, 659, 784, 1047].forEach((f, i) => this.tone(f, 200, 'triangle', delay + i * 0.08, 0.18));
+    [523, 659, 784, 1047].forEach((f) => this.tone(f, 700, 'sine', delay + 0.36, 0.09));
+    this.hiss(500, 3000, 8000, delay + 0.3, 0.07, 'highpass');
+    log('sound', 'fanfare');
+  },
+  intro(){ [392, 523, 659].forEach((f, i) => this.tone(f, 120, 'sine', i * 0.06, 0.08)); log('sound', 'intro'); },
   plop(delay){ this.tone(720, 120, 'sine', delay, 0.16, 300); log('sound', 'plop'); },
   nope(){ this.tone(140, 70, 'square', 0, 0.05); log('sound', 'nope'); },
   undo(){ this.hiss(120, 2400, 900, 0, 0.1); log('sound', 'undo'); },
-  win(){ [784, 988, 1175, 1568].forEach((f, i) => this.tone(f, 240, 'triangle', i * 0.09, 0.2)); log('sound', 'win'); },
+  win(){ this.tone(1047, 200, 'triangle', 0, 0.12); log('sound', 'win'); },
   lose(){ this.tone(330, 220, 'triangle', 0, 0.16, 220); this.tone(220, 360, 'triangle', 0.18, 0.16, 140); log('sound', 'lose'); },
 };
 function buzz(ms){ try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) {} }
@@ -483,8 +521,12 @@ function goto(screen, payload){
       • Левая половинка встала вплотную слева от правой того же цвета — щёлк, фигура в копилку.<br>
       • После хода падает новая половинка: искра на поле показывает куда, окошко «дальше» — какая.<br>
       • Собери цель, пока поле не забилось.</p><button class="primary" data-act="back">Понятно</button>`;
-  if (screen === 'win') card.innerHTML = `<h2>Собрано!</h2><div class="stars">${payload ? payload.stars : '★★★'}</div><p>${payload ? payload.text : ''}</p>
+  if (screen === 'win'){
+    const n = payload ? payload.stars : 3;
+    let st = ''; for (let i = 0; i < 3; i++) st += `<span class="st ${i < n ? 'on' : 'off'}" style="animation-delay:${(0.12 + i * 0.22).toFixed(2)}s">★</span>`;
+    card.innerHTML = `<h2>${n === 3 ? 'Идеально!' : n === 2 ? 'Отлично!' : 'Собрано!'}</h2><div class="stars">${st}</div><p>${payload ? payload.text : ''}</p>
       <div class="row"><button class="primary" data-act="next">Дальше</button><button data-act="retry">Ещё раз</button></div>`;
+  }
   if (screen === 'lose'){
     const canUndo = G.undoLeft > 0 && G.hist.length > 0;
     card.innerHTML = `<h2>Поле забито</h2><p>Ходить больше некуда. Собрано ${G.s ? G.s.docks : 0} из ${G.s ? G.s.goal : 0}.</p>
@@ -509,15 +551,25 @@ window.addEventListener('hashchange', () => { const h = location.hash.slice(1); 
 let toastUntil = 0;
 function toast(msg){ const t = $('toast'); t.textContent = msg; t.classList.remove('hide'); toastUntil = performance.now() + CFG.TOAST_MS; }
 
-function clearFx(){
-  for (const f of G.fxOpen) log('fx.end', f.name, 'cut');
-  G.slide = null; G.drop = null; G.merges = []; G.parts = []; G.wiggle = null; G.fxOpen = []; G.fxUntil = 0;
+// Мягкая очистка (новый ход): обрываем то, что привязано к клеткам; уже вспыхнувшие стыковки, частицы
+// и надписи доигрывают — быстрый игрок не теряет «щёлк». Полная (старт уровня, отмена) — всё.
+function clearFx(hard){
+  const now = performance.now();
+  const keep = (f) => !hard && f.ref && now >= f.ref.t0;
+  for (const f of G.fxOpen) if (!keep(f)) log('fx.end', f.name, 'cut');
+  G.fxOpen = G.fxOpen.filter(keep);
+  G.merges = hard ? [] : G.merges.filter(M => now >= M.t0);
+  for (let k = 0; k < G.slotAt.length; k++) if (G.slotAt[k] > now && !G.merges.some(M => M.slot === k)) G.slotAt[k] = now;
+  G.slide = null; G.drop = null; G.wiggle = null; G.land = null; G.hit = null;
+  if (hard){ G.parts = []; G.praise = []; G.shake = null; G.combo = 0; }
+  G.fxUntil = G.fxOpen.reduce((m, f) => Math.max(m, f.t1), 0);
   if (G.s) G.slotAt = G.slotAt.slice(0, G.s.docks);
 }
 function startLevel(li){
   li = Math.max(0, li);
   G.s = createState(li); G.s0 = G.s; G.hist = []; G.undoLeft = CFG.UNDO_PER_LEVEL; G.par = null;
-  G.ending = 0; G.drag = null; G.slotAt = []; clearFx(); G.levelT0 = performance.now();
+  G.ending = 0; G.drag = null; G.slotAt = []; G.winT = 0; clearFx(true); G.levelT0 = performance.now(); G.lastInputT = G.levelT0; G.hintFor = null;
+  Audio.intro(); log('fx.start', 'intro'); G.fxOpen.push({ name: 'intro', t1: G.levelT0 + CFG.INTRO_MS + CFG.INTRO_STEP * 12 });
   G.cursor = G.s.grid.findIndex(c => c > 0);
   const spec = levelSpec(li);
   $('tip').textContent = spec.tip || '';
@@ -541,7 +593,9 @@ function doMove(m){
   if (G.s.grid[i] <= 0) return false;
   const next = applyMove(G.s, m);
   if (!next){ bump(i, d); return false; }
-  clearFx();
+  clearFx(false);
+  G.lastInputT = performance.now();
+  G.combo = next.last.partner >= 0 ? G.combo + 1 : 0;
   G.hist.push(G.s); G.s = next;
   log('input', 'swipe', 'cell=' + i + ' dir=' + '→←↓↑'[d]);
   animateMove(next);
@@ -550,44 +604,94 @@ function doMove(m){
   else if (isLose(G.s)) log('event', 'level.lose', 'moves=' + G.s.moves + ' docks=' + G.s.docks);
   return true;
 }
-function fxOpen(name, t1, info){ G.fxOpen.push({ name, t1 }); log('fx.start', name, info); G.fxUntil = Math.max(G.fxUntil, t1); }
+function fxOpen(name, t1, info, ref){ G.fxOpen.push({ name, t1, ref }); log('fx.start', name, info); G.fxUntil = Math.max(G.fxUntil, t1); }
+const REDUCED = (() => { try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { return false; } })();
+function shakeAt(t0, amp){ if (REDUCED) return; if (!G.shake || G.shake.t1 < t0 || G.shake.amp < amp) G.shake = { t0, t1: t0 + CFG.SHAKE_MS / G.timeScale, amp }; }
+function praise(text, x, y, t0, color, size){ G.praise.push({ text, x: Math.max(70, Math.min(W - 70, x)), y, t0, t1: t0 + CFG.PRAISE_MS / G.timeScale, color, size: size || 26 }); log('fx.start', 'praise', text); }
+const PRAISE = ['Щёлк!', 'Отлично!', 'Супер!', 'Вау!', 'Невероятно!'];
+// Частицы: dot — кружок, rect — вертящееся конфетти, star — искра, dust — пыль. Всё от сида, без Math.random.
+function burst(n, x, y, t0, opts){
+  const rnd = mulberry32(((t0 * 7) | 0) + n * 131 + (x | 0));
+  for (let k = 0; k < n; k++){
+    const a = opts.angle !== undefined ? opts.angle + (rnd() - 0.5) * (opts.spread || 1) : rnd() * Math.PI * 2;
+    const v = (opts.v || 0.2) * (0.5 + rnd());
+    G.parts.push({ type: opts.type || 'dot', x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v + (opts.vy || 0), t0, life: (opts.life || 600) * (0.7 + rnd() * 0.6),
+      color: opts.colors ? opts.colors[k % opts.colors.length] : opts.color, r: (opts.r || 3) * (0.6 + rnd() * 0.8), rot: rnd() * 6.28, spin: (rnd() - 0.5) * 0.03, ph: rnd() * 6.28, g: opts.g === undefined ? 0.0004 : opts.g });
+  }
+}
 function animateMove(n){
   const L = n.last, T = performance.now(), ts = G.timeScale;
   const slideMs = Math.max(CFG.SLIDE_MIN_MS, L.dist * CFG.SLIDE_MS_CELL) / ts;
   const t1 = T + slideMs;
-  G.slide = { code: L.code, from: L.from, to: L.to, t0: T, t1 };
+  G.slide = { code: L.code, from: L.from, to: L.to, dir: L.dir, t0: T, t1 };
   fxOpen('slide', t1, 'cells=' + L.dist);
   Audio.swipe(slideMs); buzz(8);
+  const g = geo(), cs = g.cell, dx = DIRS[L.dir][0], dy = DIRS[L.dir][1];
+  if (L.partner < 0){
+    // остановка: плитка сплющивается, у переднего края — пыль; то, во что упёрлись, вздрагивает
+    G.land = { cell: L.to, dir: L.dir, t0: t1, t1: t1 + CFG.LAND_MS / ts };
+    const x = L.to % n.w, y = (L.to - x) / n.w, bx = x + dx, by = y + dy, p = cellXY(L.to, g);
+    const ex = p.x + cs / 2 + dx * cs * 0.45, ey = p.y + cs / 2 + dy * cs * 0.45;
+    burst(7, ex, ey, t1, { type: 'dust', color: -1, angle: Math.atan2(-dy, -dx), spread: 2.6, v: 0.09, life: 380, r: 4, g: 0 });
+    if (bx >= 0 && by >= 0 && bx < n.w && by < n.h) G.hit = { cell: by * n.w + bx, dir: L.dir, t0: t1, t1: t1 + CFG.HIT_MS / ts };
+    else if (L.dist >= 2) shakeAt(t1, 2);
+  }
   let slot = n.docks - (L.partner >= 0 ? 1 : 0) - (L.spawn && L.spawn.partner >= 0 ? 1 : 0);
   let tNext = t1;
   if (L.partner >= 0){
-    addMerge(L.to, L.partner, L.code, T, t1, slot++);
-    Audio.click(slot - 1, slideMs / 1000); buzz([10, 30, 14]);
+    addMerge(L.to, L.partner, L.code, T, t1, slot++, G.combo, 'move');
+    Audio.click(slot - 1, slideMs / 1000, G.combo); buzz([10, 30, 14]);
     tNext = t1 + CFG.DOCK_MS * 0.55 / ts;
-  } else Audio.thunk(slideMs / 1000);
+  } else Audio.thunk(slideMs / 1000, L.dist);
   if (L.spawn){
     const S = L.spawn, d1 = tNext + CFG.SPAWN_MS / ts;
     G.drop = { code: S.code, cell: S.cell, t0: tNext, t1: d1 };
     fxOpen('drop', d1, 'cell=' + S.cell + (S.cell !== S.planned ? ' moved' : ''));
     Audio.plop((tNext - T) / 1000);
-    if (S.partner >= 0){ addMerge(S.cell, S.partner, S.code, T, d1, slot++); Audio.click(slot - 1, (d1 - T) / 1000); }
+    if (S.partner >= 0){ addMerge(S.cell, S.partner, S.code, T, d1, slot++, 1, 'gift'); Audio.click(slot - 1, (d1 - T) / 1000, 1); }
+    else { const p = cellXY(S.cell, geo()); burst(8, p.x + geo().cell / 2, p.y + geo().cell * 0.9, d1, { type: 'dust', color: -1, angle: -Math.PI / 2, spread: 3, v: 0.07, life: 340, r: 3.5, g: 0 }); }
     if (S.cell !== S.planned && !G.toldSpark){ G.toldSpark = true; toast('Искру заняли — половинка упала рядом'); }   // один раз за сессию, не попап на ход
   }
+  if (isWin(n)) celebrate(G.merges.reduce((m, M) => Math.max(m, M.flyEnd), t1));
+  else if (isLose(n)) shakeAt(Math.max(G.fxUntil, t1), 7);
+}
+// Победа: когда последняя фигура долетела в копилку — «Готово!», дождь конфетти, фанфара; карточка — после паузы.
+function celebrate(t){
+  const g = geo(), hold = CFG.WIN_HOLD_MS / G.timeScale;
+  G.winT = t;
+  praise('Готово!', W / 2, g.oy + g.bh * 0.45, t, P.accent, 40);
+  const cols = [0, 1, 2, 3, 4, -2];
+  for (let k = 0; k < (REDUCED ? 20 : CFG.CONFETTI_WIN); k++){
+    const r = mulberry32(900 + k);
+    G.parts.push({ type: 'rect', x: r() * W, y: -10 - r() * 120, vx: (r() - 0.5) * 0.05, vy: 0.12 + r() * 0.16, t0: t + r() * 250, life: 2600,
+      color: cols[k % cols.length], r: 4 + r() * 3, rot: r() * 6.28, spin: (r() - 0.5) * 0.02, ph: r() * 6.28, g: 0.00005, sway: 10 });
+  }
+  shakeAt(t, 5);
+  Audio.fanfare((t - performance.now()) / 1000);
+  fxOpen('celebrate', t + hold, 'confetti=' + CFG.CONFETTI_WIN);
 }
 // Стыковка: active — клетка пришедшей половинки, partner — стоявшей. До t0 стоящую рисуем как плитку.
-function addMerge(active, partner, code, tShow, t0, slot){
-  const ts = G.timeScale, t1 = t0 + CFG.DOCK_MS / ts, flyEnd = t1 + CFG.FLY_MS / ts;
+function addMerge(active, partner, code, tShow, t0, slot, combo, kind){
+  const ts = G.timeScale, t1 = t0 + CFG.DOCK_MS / ts, flyEnd = t1 + CFG.FLY_MS / ts, col = colorOf(code);
   const lCell = sideOf(code) === 0 ? active : partner, rCell = lCell + 1;
-  G.merges.push({ lCell, rCell, active, color: colorOf(code), tShow, t0, t1, flyEnd, slot });
+  const M = { lCell, rCell, active, color: col, tShow, t0, t1, flyEnd, slot, combo: combo || 1 };
+  G.merges.push(M);
   G.slotAt[slot] = flyEnd;
-  fxOpen('dock', flyEnd, SHAPES[colorOf(code)] + ' slot=' + (slot + 1));
-  // частицы появляются в момент «щёлк» (середина стыковки); скорости — от сида, без Math.random
-  const g = geo(), c = cellXY(rCell, g), cx = c.x, cy = c.y + g.cell / 2, rnd = mulberry32(G.s.moves * 31 + slot);
-  const tp = t0 + CFG.DOCK_MS * 0.45 / ts;
-  for (let k = 0; k < 14; k++){
-    const a = rnd() * Math.PI * 2, v = 0.12 + rnd() * 0.22;
-    G.parts.push({ x: cx, y: cy, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 0.12, t0: tp, life: 420 + rnd() * 280, color: colorOf(code), r: 2.5 + rnd() * 3.5 });
-  }
+  fxOpen('dock', flyEnd, SHAPES[col] + ' slot=' + (slot + 1) + ' combo=' + M.combo, M);
+  // момент «щёлк» (середина стыковки): конфетти и искры цвета фигуры, надпись, встряска
+  const g = geo(), c = cellXY(rCell, g), cx = c.x, cy = c.y + g.cell / 2, tp = t0 + CFG.DOCK_MS * 0.45 / ts;
+  const power = Math.min(4, M.combo);
+  burst(10 + power * 3, cx, cy, tp, { type: 'dot', colors: [col, col, -2], v: 0.2 + power * 0.03, vy: -0.1, life: 650, r: 3.2 });
+  burst(CFG.CONFETTI_DOCK + power * 4, cx, cy, tp, { type: 'rect', colors: [col, -2, 2, col], v: 0.24 + power * 0.03, vy: -0.16, life: 900, r: 4, g: 0.0005 });
+  burst(5 + power, cx, cy, tp, { type: 'star', color: -2, v: 0.16, life: 520, r: 7, g: 0 });
+  const text = kind === 'gift' ? 'Подарок!' : M.combo <= 1 ? PRAISE[0] : PRAISE[Math.min(M.combo - 1, PRAISE.length - 1)] + ' ×' + M.combo;
+  praise(text, cx, c.y - g.cell * 0.15, tp, P.colors[col], 24 + power * 3);
+  shakeAt(tp, Math.min(CFG.SHAKE_MAX, CFG.SHAKE_PX + (M.combo - 1) * 1.5));
+  // фигура долетела до копилки: звон и искры вокруг слота
+  const sp = slotXY(slot, g);
+  burst(9, sp.x, sp.y, flyEnd, { type: 'star', color: 2, v: 0.12, life: 420, r: 5, g: 0 });
+  burst(8, sp.x, sp.y, flyEnd, { type: 'dot', color: col, v: 0.1, life: 360, r: 2.5, g: 0 });
+  Audio.coin((flyEnd - performance.now()) / 1000);
 }
 function bump(cell, dir){
   const T = performance.now();
@@ -597,7 +701,7 @@ function bump(cell, dir){
 function undo(){
   if (!G.s || !G.hist.length || G.undoLeft <= 0) return;
   if (G.screen !== 'game') goto('game');
-  clearFx(); G.ending = 0;
+  clearFx(true); G.ending = 0; G.lastInputT = performance.now();
   G.s = G.hist.pop(); G.undoLeft--; G.slotAt = G.slotAt.slice(0, G.s.docks);
   Audio.undo(); log('input', 'undo', 'left=' + G.undoLeft); hud();
 }
@@ -609,8 +713,9 @@ function finishEnding(){
     G.save.best[li] = Math.max(G.save.best[li] || 0, stars);
     G.save.level = Math.max(G.save.level, li + 1); save();
     Audio.win(); buzz([20, 40, 20]);
+    for (let i = 0; i < stars; i++) Audio.star(i, 0.12 + i * 0.22 + 0.25);
     log('event', 'reward', 'stars=' + stars + ' moves=' + G.s.moves + ' par=' + G.par);
-    goto('win', { stars: STARS(stars), text: 'Ходов ' + G.s.moves + (G.par != null ? ' · лучшее, что нашёл бот, — ' + G.par : '') });
+    goto('win', { stars, text: 'Ходов ' + G.s.moves + (G.par != null ? ' · лучшее, что нашёл бот, — ' + G.par : '') });
   } else { Audio.lose(); buzz(120); goto('lose'); }
 }
 
@@ -642,12 +747,13 @@ cv.addEventListener('pointerdown', (e) => {
   if (!G.s || G.screen !== 'game' || G.drag) return;
   const i = cellAt(toVirtual(e));
   if (i < 0 || G.s.grid[i] <= 0) return;
-  G.drag = { cell: i, sx: e.clientX, sy: e.clientY, id: e.pointerId, dir: -1 }; G.kbd = false;
+  G.drag = { cell: i, sx: e.clientX, sy: e.clientY, id: e.pointerId, dir: -1, len: 0 }; G.kbd = false; G.lastInputT = performance.now();
   try { cv.setPointerCapture(e.pointerId); } catch (err) {}
 });
 cv.addEventListener('pointermove', (e) => {
   const D = G.drag; if (!D || e.pointerId !== D.id) return;
   const dx = e.clientX - D.sx, dy = e.clientY - D.sy;
+  D.len = Math.hypot(dx, dy);
   D.dir = Math.hypot(dx, dy) < CFG.SWIPE_PX ? -1 : Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 0 : 1) : (dy > 0 ? 2 : 3);
 });
 function onUp(e){
@@ -659,6 +765,7 @@ function onUp(e){
 cv.addEventListener('pointerup', onUp); cv.addEventListener('pointercancel', onUp);
 document.addEventListener('keydown', (e) => {          // дубли на клавиатуру для отладки (§3): WASD — курсор, стрелки — свайп
   if (!G.s) return;
+  G.lastInputT = performance.now();
   const w = G.s.w, N = G.s.grid.length, c = G.cursor;
   const arrows = { ArrowRight: 0, ArrowLeft: 1, ArrowDown: 2, ArrowUp: 3 }, cur = { d: 1, a: -1, s: w, w: -w };
   if (e.key in arrows){ e.preventDefault(); G.kbd = true; if (doMove(c * 4 + arrows[e.key]) && G.s.grid[G.s.last.to] > 0) G.cursor = G.s.last.to; }
@@ -742,12 +849,14 @@ function drawHalf(c, col, side, edgeX, cy, R, top, height){
 }
 // Плитка с половинкой в клетке (x, y) размера s. Ровный край половинки лежит на краю плитки —
 // две соседние плитки «левая | правая» показывают почти целую фигуру с зазором.
-function drawPiece(c, code, x, y, s, alpha, scl){
-  const pad = s * 0.06, r = s * 0.2, cx = x + s / 2, cy = y + s / 2;
+// scl — общий масштаб, sx/sy — растяжение по осям (скольжение, сплющивание при остановке).
+function drawPiece(c, code, x, y, s, alpha, scl, sx, sy){
+  const pad = s * 0.06, r = s * 0.2, cx = x + s / 2, cy = y + s / 2, kx = (scl || 1) * (sx || 1), ky = (scl || 1) * (sy || 1);
   c.save(); c.globalAlpha = alpha === undefined ? 1 : alpha;
-  if (scl && scl !== 1){ c.translate(cx, cy); c.scale(scl, scl); c.translate(-cx, -cy); }
+  if (kx !== 1 || ky !== 1){ c.translate(cx, cy); c.scale(kx, ky); c.translate(-cx, -cy); }
   c.fillStyle = P.shadow; rr(c, x + pad, y + pad + s * 0.05, s - 2 * pad, s - 2 * pad, r); c.fill();
   c.fillStyle = P.tile; rr(c, x + pad, y + pad, s - 2 * pad, s - 2 * pad, r); c.fill();
+  c.fillStyle = 'rgba(255,255,255,0.7)'; rr(c, x + s * 0.18, y + pad + s * 0.035, s * 0.64, s * 0.07, s * 0.035); c.fill();   // блик сверху
   const side = sideOf(code), edge = side === 0 ? x + s - pad : x + pad;
   drawHalf(c, colorOf(code), side, edge, cy, s * HALF_R, y + pad, s - 2 * pad);
   c.restore();
@@ -779,6 +888,76 @@ function drawHand(c, x, y, dx, now){
   c.fillStyle = 'rgba(60,40,60,0.18)'; c.beginPath(); c.arc(px + 3, y + 5, 17, 0, Math.PI * 2); c.fill();
   c.fillStyle = '#fff'; c.strokeStyle = P.ink; c.lineWidth = 2.5; c.beginPath(); c.arc(px, y, 16, 0, Math.PI * 2); c.fill(); c.stroke();
   c.restore();
+}
+const backOut = (u) => { u = u < 0 ? 0 : u > 1 ? 1 : u; const c1 = 1.70158, t = u - 1; return 1 + (c1 + 1) * t * t * t + c1 * t * t; };
+// Фон: несколько бледных фигур медленно всплывают за полем — поле живёт и в покое. Позиции от сида.
+const FLOATERS = Array.from({ length: 10 }, (_, k) => { const r = mulberry32(500 + k); return { x: r() * 400, y0: r() * 1000, sp: 0.006 + r() * 0.01, col: k % 5, R: 9 + r() * 13, rot: r() * 6.28, vr: (r() - 0.5) * 0.0004 }; });
+function drawBackdrop(c, now){
+  const t = REDUCED ? 0 : now;
+  c.save(); c.globalAlpha = 0.08;
+  for (const f of FLOATERS){
+    const span = H + 80, y = ((f.y0 - t * f.sp) % span + span) % span - 40;
+    c.save(); c.translate(f.x, y); c.rotate(f.rot + t * f.vr); drawShape(c, f.col, 0, 0, f.R); c.restore();
+  }
+  c.restore();
+}
+function shakeOffset(now){
+  const S = G.shake; if (!S || now < S.t0 || now >= S.t1) return { x: 0, y: 0 };
+  const u = (now - S.t0) / (S.t1 - S.t0), a = S.amp * (1 - u) * (1 - u);
+  return { x: Math.sin(now * 0.11) * a, y: Math.cos(now * 0.137) * a * 0.7 };
+}
+// Вспышка «щёлк»: белый ореол, лучи цвета фигуры и ударная волна; power растёт с серией.
+function drawBurst(c, x, y, R, col, v, power){
+  const k = 1 - v;
+  const gr = c.createRadialGradient(x, y, 0, x, y, R * (1.4 + v));
+  gr.addColorStop(0, 'rgba(255,255,255,' + (0.95 * k) + ')'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  c.fillStyle = gr; c.beginPath(); c.arc(x, y, R * (1.4 + v), 0, Math.PI * 2); c.fill();
+  c.save(); c.translate(x, y); c.rotate(v * 0.7); c.globalAlpha = 0.55 * k; c.fillStyle = P.colors[col];
+  const n = 10 + power * 2, len = R * (1.3 + (1.4 + power * 0.25) * ease(v));
+  for (let i = 0; i < n; i++){ c.rotate(Math.PI * 2 / n); c.beginPath(); c.moveTo(-R * 0.08, R * 0.7); c.lineTo(R * 0.08, R * 0.7); c.lineTo(0, len); c.closePath(); c.fill(); }
+  c.restore();
+  c.save(); c.globalAlpha = 0.6 * k; c.strokeStyle = P.colors[col]; c.lineWidth = 6 * k + 1;
+  c.beginPath(); c.arc(x, y, R * (1 + 1.8 * ease(v)), 0, Math.PI * 2); c.stroke();
+  c.globalAlpha = 0.4 * k; c.strokeStyle = '#fff'; c.lineWidth = 3 * k + 1; c.beginPath(); c.arc(x, y, R * (0.8 + 1.2 * ease(v)), 0, Math.PI * 2); c.stroke();
+  c.restore();
+}
+// Частицы: позиция — от момента рождения (абсолютное время), без накопления dt.
+function partColor(q){ return q.color === -1 ? P.shadow : q.color === -2 ? '#ffffff' : P.colors[q.color]; }
+function drawParticles(c, now){
+  for (const q of G.parts){
+    const t = now - q.t0; if (t < 0 || t > q.life) continue;
+    const u = t / q.life, x = q.x + q.vx * t + (q.sway ? Math.sin(t / 220 + q.ph) * q.sway : 0), y = q.y + q.vy * t + q.g * t * t;
+    c.globalAlpha = q.type === 'rect' && q.life > 2000 ? Math.min(1, (1 - u) * 3) : 1 - u * u;
+    c.fillStyle = partColor(q);
+    if (q.type === 'rect'){
+      c.save(); c.translate(x, y); c.rotate(q.rot + q.spin * t); c.scale(1, Math.abs(Math.cos(t / 120 + q.ph)) * 0.8 + 0.2);
+      c.fillRect(-q.r, -q.r * 0.6, q.r * 2, q.r * 1.2); c.restore();
+    } else if (q.type === 'star'){
+      c.save(); c.translate(x, y); c.rotate(t / 200); sparkIconFill(c, 0, 0, q.r * (1 - u * 0.6), partColor(q)); c.restore();
+    } else if (q.type === 'dust'){
+      c.globalAlpha = 0.55 * (1 - u); c.beginPath(); c.arc(x, y, q.r * (1 + u * 1.5), 0, Math.PI * 2); c.fill();
+    } else { c.beginPath(); c.arc(x, y, q.r * (1 - u * 0.5), 0, Math.PI * 2); c.fill(); }
+  }
+  c.globalAlpha = 1;
+  if (G.parts.length > 400) G.parts = G.parts.filter(q => now - q.t0 < q.life);
+}
+function sparkIconFill(c, cx, cy, R, color){
+  c.fillStyle = color; c.beginPath();
+  for (let a = 0; a < 8; a++){ const ang = a * Math.PI / 4, rad = a % 2 ? R * 0.35 : R; c.lineTo(cx + Math.cos(ang) * rad, cy + Math.sin(ang) * rad); }
+  c.closePath(); c.fill();
+}
+// Надписи «Щёлк!», «Отлично! ×2», «Готово!»: выпрыгивают, всплывают и тают; белая обводка для читаемости.
+function drawPraise(c, now){
+  for (const p of G.praise){
+    const u = (now - p.t0) / (p.t1 - p.t0); if (u < 0 || u > 1) continue;
+    const sc = u < 0.18 ? 0.6 + 0.9 * backOut(u / 0.18) * 0.75 : 1.1 - 0.1 * Math.min(1, (u - 0.18) * 3);
+    c.save(); c.globalAlpha = u > 0.7 ? 1 - (u - 0.7) / 0.3 : 1;
+    c.translate(p.x, p.y - 46 * ease(u)); c.scale(sc, sc); c.rotate(-0.05);
+    c.font = '900 ' + p.size + 'px system-ui, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.lineJoin = 'round'; c.lineWidth = p.size * 0.28; c.strokeStyle = '#fff'; c.strokeText(p.text, 0, 0);
+    c.fillStyle = p.color; c.fillText(p.text, 0, 0); c.restore();
+  }
+  if (G.praise.length > 20) G.praise = G.praise.filter(p => now < p.t1);
 }
 const ease = (u) => u < 0 ? 0 : u > 1 ? 1 : 1 - (1 - u) * (1 - u);
 const easeIO = (u) => u < 0 ? 0 : u > 1 ? 1 : u * u * (3 - 2 * u);
@@ -813,8 +992,10 @@ function drawGoal(c, g, now){
   c.fillText('ЦЕЛЬ', g.px + 14, g.py + 22);
   c.fillStyle = P.ink; c.font = '600 13px system-ui, sans-serif';
   c.fillText('собери ' + G.s.goal + ' ' + plural(G.s.goal, 'фигуру', 'фигуры', 'фигур'), g.px + 54, g.py + 22);
-  c.textAlign = 'right'; c.font = '800 20px system-ui, sans-serif'; c.fillStyle = shown >= G.s.goal ? P.colors[3] : P.ink;
-  c.fillText(shown + ' / ' + G.s.goal, g.px + g.goalW - 14, g.py + 24);
+  const landT = shown ? G.slotAt[shown - 1] || 0 : 0, cp = Math.max(0, 1 - (now - landT) / 320);
+  c.save(); c.translate(g.px + g.goalW - 14, g.py + 18); c.scale(1 + 0.45 * cp, 1 + 0.45 * cp);
+  c.textAlign = 'right'; c.textBaseline = 'middle'; c.font = '800 20px system-ui, sans-serif'; c.fillStyle = shown >= G.s.goal ? P.colors[3] : cp > 0 ? P.accent : P.ink;
+  c.fillText(shown + ' / ' + G.s.goal, 0, 0); c.restore(); c.textBaseline = 'alphabetic';
   for (let k = 0; k < G.s.goal; k++){
     const p = slotXY(k, g), filled = k < shown;
     if (filled){
@@ -864,19 +1045,37 @@ function render(){
   ctx.clearRect(0, 0, W, H);
   if (!G.s) return;
   const s = G.s, g = geo(), cs = g.cell;
-  // поле и лунки
+  drawBackdrop(ctx, now);
+  const sh = shakeOffset(now); ctx.translate(sh.x, sh.y);
+  // поле и лунки; мало места — рамка тревожно пульсирует
+  ctx.fillStyle = P.shadow; rr(ctx, g.ox - 8, g.oy - 4, g.bw + 16, g.bh + 16, 18); ctx.fill();
   ctx.fillStyle = P.board; rr(ctx, g.ox - 8, g.oy - 8, g.bw + 16, g.bh + 16, 18); ctx.fill();
+  if (s.every > 0 && !isWin(s)){
+    let empty = 0; for (const c of s.grid) if (c === 0) empty++;
+    if (empty <= CFG.DANGER_EMPTY){
+      const k = 0.5 + 0.5 * Math.sin(now / (110 + empty * 30));
+      ctx.save(); ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--danger'); ctx.globalAlpha = 0.25 + 0.5 * k * (1 - empty / (CFG.DANGER_EMPTY + 1));
+      ctx.lineWidth = 4; rr(ctx, g.ox - 8, g.oy - 8, g.bw + 16, g.bh + 16, 18); ctx.stroke(); ctx.restore();
+    }
+  }
   for (let i = 0; i < s.grid.length; i++){ const p = cellXY(i, g); ctx.fillStyle = P.slot; rr(ctx, p.x + cs * 0.05, p.y + cs * 0.05, cs * 0.9, cs * 0.9, cs * 0.18); ctx.fill(); }
   if (s.every > 0 && s.next && s.next.cell >= 0 && s.li <= 3 && s.moves < 3 && !(G.drop && now < G.drop.t1)) drawGuide(ctx, g, now);   // под панелями: дуга выходит из-под карточек и не пересекает текст
   drawGoal(ctx, g, now);
-  if (s.every > 0 && s.next) drawNext(ctx, g, now);
+  if (s.every > 0 && s.next && !isWin(s)) drawNext(ctx, g, now);
   // искра следующей раздачи
-  if (s.every > 0 && s.next && s.next.cell >= 0 && !(G.drop && now < G.drop.t1)){ const p = cellXY(s.next.cell, g); drawSpark(ctx, p.x, p.y, cs, s.next.code, now); }
+  if (s.every > 0 && s.next && s.next.cell >= 0 && !isWin(s) && !(G.drop && now < G.drop.t1)){ const p = cellXY(s.next.cell, g); drawSpark(ctx, p.x, p.y, cs, s.next.code, now); }
   // превью свайпа: честный расчёт ядра — куда доедет и будет ли щёлк
   let ghost = null;
   if (G.drag && G.drag.dir >= 0){
     const pk = peekMove(s, G.drag.cell * 4 + G.drag.dir);
     if (pk.to !== G.drag.cell) ghost = { to: pk.to, partner: pk.partner, code: s.grid[G.drag.cell] };
+  }
+  // подсказка при бездействии: плитка с готовой стыковкой подмигивает в сторону пары (ход ядра, не догадка)
+  let hintCell = -1, hintDir = 0, hintK = 0;
+  const idle = now - G.lastInputT - CFG.IDLE_HINT_MS;
+  if (idle > 0 && G.screen === 'game' && !G.drag && now >= G.fxUntil && !isWin(s) && !isLose(s)){
+    if (G.hintFor !== s){ G.hintFor = s; const dm = dockMoves(s); G.hintMove = dm.length ? dm[0] : -1; if (G.hintMove >= 0) log('fx.start', 'hint', 'cell=' + (G.hintMove >> 2)); }
+    if (G.hintMove >= 0){ hintCell = G.hintMove >> 2; hintDir = G.hintMove & 3; const ph = (idle % 1400) / 1400; hintK = ph < 0.4 ? Math.sin(ph / 0.4 * Math.PI * 2) : 0; }
   }
   // плитки из ядра; те, что сейчас в анимации, рисуют свои эффекты
   const skip = new Set();
@@ -891,15 +1090,40 @@ function render(){
   for (let i = 0; i < s.grid.length; i++){
     const c = s.grid[i]; if (!c || skip.has(i)) continue;
     let { x, y } = cellXY(i, g);
+    if (G.hit && G.hit.cell === i && now >= G.hit.t0 && now < G.hit.t1){      // во что упёрлись — вздрагивает от удара
+      const v = (now - G.hit.t0) / (G.hit.t1 - G.hit.t0), k = Math.sin(v * Math.PI) * (1 - v) * cs * 0.09;
+      x += DIRS[G.hit.dir][0] * k; y += DIRS[G.hit.dir][1] * k;
+    }
     if (c === STONE){ drawStone(ctx, i, x, y, cs); continue; }
-    let scl = 1;
+    let scl = 1, sx = 1, sy = 1;
+    if (now < G.levelT0 + CFG.INTRO_MS + CFG.INTRO_STEP * (s.w + s.h)){   // старт уровня: плитки впрыгивают по диагонали
+      const v = (now - G.levelT0 - CFG.INTRO_STEP * ((i % s.w) + Math.floor(i / s.w))) / CFG.INTRO_MS;
+      scl = 0.35 + 0.65 * backOut(v);
+    }
+    if (G.land && G.land.cell === i && now >= G.land.t0 && now < G.land.t1){  // остановка: сплющивание вдоль хода
+      const v = (now - G.land.t0) / (G.land.t1 - G.land.t0), q = Math.sin(v * Math.PI) * (1 - v * 0.5) * 0.2;
+      if (G.land.dir < 2){ sx = 1 - q; sy = 1 + q * 0.7; } else { sy = 1 - q; sx = 1 + q * 0.7; }
+      x += DIRS[G.land.dir][0] * q * cs * 0.25; y += DIRS[G.land.dir][1] * q * cs * 0.25;
+    }
+    if (isWin(s) && G.winT && now >= G.winT){                                // победа: оставшиеся плитки подпрыгивают волной
+      const v = (now - G.winT - 70 * ((i % s.w) + Math.floor(i / s.w))) / 320;
+      if (v > 0 && v < 1){ const hop = Math.sin(v * Math.PI); y -= hop * cs * 0.18; scl *= 1 + hop * 0.08; }
+    }
+    if (i === hintCell){
+      x += DIRS[hintDir][0] * hintK * cs * 0.08; y += DIRS[hintDir][1] * hintK * cs * 0.08;
+    }
     if (G.wiggle && G.wiggle.cell === i && now < G.wiggle.t1){
       const u = (now - G.wiggle.t0) / (G.wiggle.t1 - G.wiggle.t0), k = Math.sin(u * Math.PI * 3) * (1 - u) * cs * 0.06;
       if (G.wiggle.dir < 0) scl = 1 + Math.sin(u * Math.PI) * 0.06; else { x += DIRS[G.wiggle.dir][0] * k; y += DIRS[G.wiggle.dir][1] * k; }
     }
-    if (G.drag && G.drag.cell === i) scl *= 1.05;
-    if (ghost && ghost.partner === i) scl *= 1 + 0.05 * (0.5 + 0.5 * Math.sin(now / 90));
-    drawPiece(ctx, c, x, y, cs, 1, scl);
+    if (G.drag && G.drag.cell === i){                                          // плитка тянется за пальцем «резинкой»
+      scl *= 1.06;
+      if (G.drag.dir >= 0){ const pull = Math.min(cs * CFG.DRAG_PULL, G.drag.len / scale * 0.25); x += DIRS[G.drag.dir][0] * pull; y += DIRS[G.drag.dir][1] * pull; }
+    }
+    if (ghost && ghost.partner === i) scl *= 1 + 0.06 * (0.5 + 0.5 * Math.sin(now / 80));
+    drawPiece(ctx, c, x, y, cs, 1, scl, sx, sy);
+    if (i === hintCell){ ctx.save(); ctx.globalAlpha = 0.45 + 0.45 * Math.abs(hintK); ctx.strokeStyle = P.accent; ctx.lineWidth = 3.5;
+      rr(ctx, x + 1, y + 1, cs - 2, cs - 2, cs * 0.22); ctx.stroke(); ctx.restore(); }
     if (G.kbd && i === G.cursor){ ctx.strokeStyle = P.accent; ctx.lineWidth = 3; rr(ctx, x + 2, y + 2, cs - 4, cs - 4, cs * 0.2); ctx.stroke(); }
   }
   if (G.kbd && s.grid[G.cursor] <= 0){ const p = cellXY(G.cursor, g); ctx.strokeStyle = P.accent; ctx.lineWidth = 2; rr(ctx, p.x + 4, p.y + 4, cs - 8, cs - 8, cs * 0.2); ctx.stroke(); }
@@ -911,8 +1135,15 @@ function render(){
   }
   // скольжение
   if (G.slide && now < G.slide.t1){
-    const S = G.slide, u = easeIO((now - S.t0) / (S.t1 - S.t0)), a = cellXY(S.from, g), b = cellXY(S.to, g);
-    drawPiece(ctx, S.code, a.x + (b.x - a.x) * u, a.y + (b.y - a.y) * u, cs);
+    // разгон (как по льду до удара), бледный шлейф позади, растяжение вдоль хода
+    const S = G.slide, a = cellXY(S.from, g), b = cellXY(S.to, g), raw = (now - S.t0) / (S.t1 - S.t0);
+    const pos = (r) => { r = Math.max(0, Math.min(1, r)); return r * 0.55 + r * r * 0.45; };
+    for (let k = CFG.TRAIL_N; k >= 1; k--){
+      const uk = pos(raw - k * 0.09); if (raw - k * 0.09 <= 0) continue;
+      drawPiece(ctx, S.code, a.x + (b.x - a.x) * uk, a.y + (b.y - a.y) * uk, cs, 0.22 * (1 - k / (CFG.TRAIL_N + 1)), 0.92);
+    }
+    const u = pos(raw), st = 0.14 * Math.sin(Math.min(1, raw) * Math.PI * 0.9);
+    drawPiece(ctx, S.code, a.x + (b.x - a.x) * u, a.y + (b.y - a.y) * u, cs, 1, 1, S.dir < 2 ? 1 + st : 1 - st * 0.5, S.dir < 2 ? 1 - st * 0.5 : 1 + st);
   }
   // падение раздачи
   if (G.drop && now < G.drop.t1 && now >= G.drop.t0){
@@ -920,8 +1151,8 @@ function render(){
     const D = G.drop, u = (now - D.t0) / (D.t1 - D.t0), p = cellXY(D.cell, g), t = nextTile(g);
     const v = easeIO(Math.min(1, u / 0.8)), k0 = t.s / cs;
     const x = t.x + (p.x - t.x) * v, y = t.y + (p.y - t.y) * v - Math.sin(v * Math.PI) * 50;
-    const sc = u < 0.8 ? k0 + (1 - k0) * v : 1 + 0.08 * Math.sin((u - 0.8) / 0.2 * Math.PI);
-    drawPiece(ctx, D.code, x, y, cs, 1, sc);
+    const sc = u < 0.8 ? k0 + (1 - k0) * v : 1, q = u < 0.8 ? 0 : Math.sin((u - 0.8) / 0.2 * Math.PI) * 0.16;
+    drawPiece(ctx, D.code, x, y, cs, 1, sc, 1 + q, 1 - q);
   }
   // стыковки: половинки сходятся → вспышка целого → полёт в копилку
   for (const M of G.merges){
@@ -929,29 +1160,26 @@ function render(){
     const a = cellXY(M.lCell, g), edgeX = a.x + cs, cy = a.y + cs / 2, R = cs * HALF_R;
     const u = (now - M.t0) / (M.t1 - M.t0);
     if (u < 0.45){
-      const v = easeIO(u / 0.45), gap = cs * 0.06 * (1 - v);
+      const v = backOut(u / 0.45), gap = cs * 0.06 * (1 - v);
       ctx.save(); ctx.globalAlpha = 1 - v * 0.7;
       ctx.fillStyle = P.tile; rr(ctx, a.x + cs * 0.06 + v * cs * 0.3, a.y + cs * 0.06, cs * 1.88 - v * cs * 0.6, cs * 0.88, cs * 0.2); ctx.fill(); ctx.restore();
       drawHalf(ctx, M.color, 0, edgeX - gap, cy, R, a.y, cs);
       drawHalf(ctx, M.color, 1, edgeX + gap, cy, R, a.y, cs);
     } else if (u < 1){
-      const v = (u - 0.45) / 0.55, pulse = 1 + 0.3 * Math.sin(Math.min(1, v * 1.6) * Math.PI);
-      ctx.save(); ctx.globalAlpha = 0.5 * (1 - v); ctx.strokeStyle = P.colors[M.color]; ctx.lineWidth = 4;
-      ctx.beginPath(); ctx.arc(edgeX, cy, R * (1 + v * 1.4), 0, Math.PI * 2); ctx.stroke(); ctx.restore();
-      drawShape(ctx, M.color, edgeX, cy, R * pulse);
+      const v = (u - 0.45) / 0.55, pulse = 1 + (0.35 + 0.05 * Math.min(4, M.combo)) * Math.sin(Math.min(1, v * 1.6) * Math.PI);
+      drawBurst(ctx, edgeX, cy, R, M.color, v, Math.min(4, M.combo));
+      ctx.save(); ctx.translate(edgeX, cy); ctx.rotate(Math.sin(v * Math.PI * 2) * 0.12 * (1 - v)); drawShape(ctx, M.color, 0, 0, R * pulse); ctx.restore();
     } else {
       const v = easeIO((now - M.t1) / (M.flyEnd - M.t1)), sp = slotXY(M.slot, g);
       const x = edgeX + (sp.x - edgeX) * v, y = cy + (sp.y - cy) * v - Math.sin(v * Math.PI) * 60;
-      drawShape(ctx, M.color, x, y, R + (sp.r - R) * v);
+      ctx.save(); ctx.globalAlpha = 0.3; for (let k = 1; k <= 3; k++){ const vk = easeIO((now - M.t1 - k * 30) / (M.flyEnd - M.t1)); if (vk <= 0) continue;
+        drawShape(ctx, M.color, edgeX + (sp.x - edgeX) * vk, cy + (sp.y - cy) * vk - Math.sin(vk * Math.PI) * 60, (R + (sp.r - R) * vk) * (1 - k * 0.15)); }
+      ctx.restore();
+      ctx.save(); ctx.translate(x, y); ctx.rotate(v * Math.PI * 2); drawShape(ctx, M.color, 0, 0, R + (sp.r - R) * v); ctx.restore();
     }
   }
-  // частицы — позиция от момента рождения (абсолютное время), без накопления dt
-  for (const q of G.parts){
-    const t = now - q.t0; if (t < 0 || t > q.life) continue;
-    ctx.globalAlpha = 1 - t / q.life; ctx.fillStyle = P.colors[q.color];
-    ctx.beginPath(); ctx.arc(q.x + q.vx * t, q.y + q.vy * t + 0.0004 * t * t, q.r, 0, Math.PI * 2); ctx.fill();
-  }
-  ctx.globalAlpha = 1;
+  drawParticles(ctx, now);
+  drawPraise(ctx, now);
   // рука-подсказка на первом уровне до первого хода
   if (s.li === 0 && s.moves === 0 && !G.drag){
     const i = s.grid.findIndex(c => c > 0 && sideOf(c) === 0);
@@ -959,7 +1187,7 @@ function render(){
   }
   // журнал fx.end и финал — по состоянию в кадре, не по событию (урок «Стыковки»)
   if (G.fxOpen.length){ const keep = []; for (const f of G.fxOpen){ if (now >= f.t1) log('fx.end', f.name); else keep.push(f); } G.fxOpen = keep; }
-  if (G.screen === 'game' && !G.ending && (isWin(s) || isLose(s)) && now >= G.fxUntil) G.ending = now + CFG.END_DELAY_MS;
+  if (G.screen === 'game' && !G.ending && (isWin(s) || isLose(s)) && now >= G.fxUntil) G.ending = now + (isWin(s) ? 0 : CFG.END_DELAY_MS);
   if (G.ending && now >= G.ending) finishEnding();
   const tipTop = Math.round(g.tipY * scale) + 'px'; if (tipEl.style.top !== tipTop) tipEl.style.top = tipTop;
   if (toastUntil && now > toastUntil){ $('toast').classList.add('hide'); toastUntil = 0; }
