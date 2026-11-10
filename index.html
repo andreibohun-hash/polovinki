@@ -52,6 +52,8 @@ button.primary{background:var(--accent);color:#fff;font-weight:700}
 .levels .ch{grid-column:1/-1;text-align:left;font-size:12px;color:var(--muted);font-weight:700;margin-top:4px}
 .levels button{padding:8px 0;font-size:14px}
 .levels button small{display:block;font-size:10px;color:var(--c2)}
+.levels button.locked{opacity:.4}
+.cheat{margin-top:10px;font-size:12px;padding:6px 10px;background:transparent;border:1.5px dashed var(--muted);color:var(--muted)}
 #toast{position:absolute;left:50%;bottom:90px;transform:translateX(-50%);background:var(--ink);color:var(--frame);padding:8px 14px;border-radius:10px;
   pointer-events:none;opacity:.95;transition:opacity .25s;white-space:nowrap}
 #toast.hide{opacity:0}
@@ -571,7 +573,7 @@ const G = {
   undoLeft: 0,
   par: null,                     // лучшее решение солвера (для звёзд), считается после старта
   screen: 'menu',                // menu | game | help | win | lose
-  save: Object.assign({ level: 0, muted: false, best: {} }, loadSave()),
+  save: Object.assign({ level: 0, muted: false, best: {}, unlockAll: false }, loadSave()),   // unlockAll — чит «открыть все уровни»
   slide: null,                   // { code, from, to, t0, t1 } — скользящая плитка
   drop: null,                    // { code, cell, t0, t1 } — падающая раздача
   merges: [],                    // [{ aCell, bCell, aCode, bCode, vert, active, color, tShow, t0, t1, flyEnd, slot, target, combo }]
@@ -662,6 +664,9 @@ function buzz(ms){ try { if (navigator.vibrate) navigator.vibrate(ms); } catch (
 const $ = (id) => document.getElementById(id);
 const STARS = (k) => '★'.repeat(k) + '☆'.repeat(3 - k);
 function starsFor(s, par){ return par == null ? 3 : s.moves <= par + CFG.STAR3_SLACK ? 3 : s.moves <= par + CFG.STAR2_SLACK ? 2 : 1; }
+// Уровень открыт, если до него дошёл прогресс или включён чит «открыть все уровни».
+function isOpen(li){ return G.save.unlockAll || li <= G.save.level; }
+function setUnlockAll(on){ G.save.unlockAll = !!on; save(); log('event', 'cheat', 'unlockAll=' + G.save.unlockAll); if (on) toast('Все уровни открыты'); }
 function goto(screen, payload){
   G.screen = screen; log('screen', screen);
   const ov = $('overlay'), card = $('card');
@@ -670,10 +675,15 @@ function goto(screen, payload){
   if (screen === 'menu'){
     let lv = '';
     const CH = { 0: 'Основа', 10: 'A · верх и низ', 15: 'B · мёд', 20: 'C · радужная', 25: 'D · ящики', 30: 'E · цепи', 35: 'F · таймер', 40: 'G · заказ', 45: 'Экзамен' };
-    for (let i = 0; i < LEVELS.length; i++){ if (CH[i]) lv += `<div class="ch">${CH[i]}</div>`; const b = G.save.best[i] || 0; lv += `<button data-act="lvl" data-li="${i}">${i + 1}<small>${b ? STARS(b) : '&nbsp;'}</small></button>`; }
+    for (let i = 0; i < LEVELS.length; i++){
+      if (CH[i]) lv += `<div class="ch">${CH[i]}</div>`;
+      const b = G.save.best[i] || 0, open = isOpen(i);
+      lv += `<button data-act="lvl" data-li="${i}" class="${open ? '' : 'locked'}">${open ? i + 1 : '🔒'}<small>${b ? STARS(b) : open ? '&nbsp;' : i + 1}</small></button>`;
+    }
     card.innerHTML = `<h2>Половинки</h2><p>Свайпни половинку — она скользит до упора. Левую стыкуй с правой того же цвета.</p>
       <div class="row"><button class="primary" data-act="play">Играть · уровень ${G.save.level + 1}</button></div>
-      <div class="levels">${lv}</div><div class="row"><button data-act="help">Как играть</button></div>`;
+      <div class="levels">${lv}</div><div class="row"><button data-act="help">Как играть</button></div>
+      <div class="row">${G.save.unlockAll ? '<button class="cheat" data-act="relock">Чит включён · закрыть обратно</button>' : '<button class="cheat" data-act="unlock">Чит: открыть все уровни</button>'}<button class="cheat" data-act="wipe">Сбросить прогресс</button></div>`;
   }
   if (screen === 'help') card.innerHTML = `<h2>Как играть</h2><p style="text-align:left">
       • Свайп по плитке — она скользит до стены, камня или другой плитки.<br>
@@ -699,7 +709,9 @@ $('card').addEventListener('click', (e) => {
   const act = el && el.dataset.act; if (!act) return;
   Audio.init(); log('input', 'button', act);
   if (act === 'play') startLevel(G.save.level);
-  else if (act === 'lvl') startLevel(+el.dataset.li);
+  else if (act === 'lvl'){ if (isOpen(+el.dataset.li)) startLevel(+el.dataset.li); else { toast('Сначала пройди уровень ' + (G.save.level + 1)); Audio.nope(); } }
+  else if (act === 'unlock' || act === 'relock'){ setUnlockAll(act === 'unlock'); goto('menu'); }
+  else if (act === 'wipe'){ G.save = { level: 0, muted: G.save.muted, best: {}, unlockAll: false }; save(); log('event', 'cheat', 'wipe'); goto('menu'); }
   else if (act === 'retry') startLevel(G.s ? G.s.li : G.save.level);
   else if (act === 'next') startLevel(G.s ? G.s.li + 1 : G.save.level);
   else if (act === 'undo'){ goto('game'); undo(); }
@@ -1543,12 +1555,13 @@ window.POLOVINKI = {
     return this.state();
   },
   speed(x){ G.timeScale = x || 1; return G.timeScale; },
+  unlockAll(on){ setUnlockAll(on === undefined ? true : on); if (G.screen === 'menu') goto('menu'); return G.save.unlockAll; },   // чит: открыть все уровни
   reset(){ try { localStorage.removeItem(SAVE_KEY); } catch (e) {} location.reload(); },
 };
 
 // --- старт ---
 fit(); hud();
-const startHash = location.hash.slice(1);
+const startHash = location.hash.slice(1) === 'unlock' ? (setUnlockAll(true), 'menu') : location.hash.slice(1);
 if (startHash === 'game') startLevel(G.save.level); else goto(startHash || 'menu');
 requestAnimationFrame(frame);
 log('event', 'boot', 'levels=' + LEVELS.length);
