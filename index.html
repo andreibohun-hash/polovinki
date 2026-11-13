@@ -100,7 +100,8 @@ button.primary{background:var(--accent);color:#fff;font-weight:700}
 // целая фигура уходит в открытый заказ, которому она нужна. Фигура, которую никто не заказал, ложится
 // в лоток (cap мест) и сама уйдёт в заказ, когда такой откроется; места в лотке нет — проигрыш.
 // После каждого хода (или каждого every-го) на поле падает новая половинка в клетку с искрой (видно заранее).
-// Цель — закрыть все заказы очереди (и сломать ящики, если есть); ходить некуда — тоже проигрыш.
+// Цель — закрыть все заказы очереди (и сломать ящики, если есть). Проигрыш — поле забито (пустых клеток нет и ходить некуда)
+// или лишняя фигура не влезла в лоток. Если ходить нечем, а место на поле есть, раздача падает сама (topUp) — это не проигрыш.
 // Коды клеток: 0 — пусто, -1 — камень, -2 — ящик, половинка — см. pieceCode ниже.
 // Ход — число m = клетка*4 + направление (0 →, 1 ←, 2 ↓, 3 ↑).
 // ---------------------------------------------------------------------------
@@ -118,7 +119,7 @@ const CFG = {
   REVIVE_PAIRS: 2,     // «Продолжить» после проигрыша: сколько пар под заказ магнит стыкует сам (плюс пустой лоток и метла)
   STAR3_K: 1.35,       // ★★★ — ходов не больше par × STAR3_K (par — лучшее, что нашёл луч солвера)
   STAR2_K: 1.75,       // ★★ — ходов не больше par × STAR2_K
-  BOOST_FROM: 7,       // с какого уровня видны бустеры (до этого игрок учит заказы и лоток)
+  BOOST_FROM: 7,       // с какого уровня видны бустеры и рекламное место в лотке (до этого игрок учит заказы и лоток)
   INTER_FROM: 8,       // с какого уровня после победы стоял бы межуровневый ролик (заглушка: только строка в журнале)
   // --- оболочка: тайминги (мс, абсолютное время) и ввод ---
   SLIDE_MS_CELL: 55,   // скольжение плитки на одну клетку
@@ -461,7 +462,7 @@ function spawnOverflows(s, cell, code){
 }
 // Падение раздачи: в клетку искры, а если её заняли — в ближайшую пустую. Может сразу состыковаться.
 // Раздача не проигрывает уровень за игрока: если её стыковка переполнила бы лоток, она падает в другую пустую клетку.
-function spawn(s, ev){
+function spawn(s, ev, by){
   const want = s.next.cell, code = s.next.code;
   let cell = want >= 0 && s.grid[want] === 0 ? want : nearestEmpty(s.grid, s.w, Math.max(0, want));
   if (cell < 0) return null;
@@ -477,10 +478,23 @@ function spawn(s, ev){
   s.grid[cell] = code;
   const partner = dockPartner(s.grid, s.w, s.h, cell, code), partnerCode = partner >= 0 ? s.grid[partner] : 0;
   let color = -1, target = null;
-  if (partner >= 0){ const d = dock(s, cell, partner, ev, 'spawn'); color = d.color; target = d.target; }
+  if (partner >= 0){ const d = dock(s, cell, partner, ev, by || 'spawn'); color = d.color; target = d.target; }
   s.k++;
   planNext(s);
   return { cell, code, partner, partnerCode, planned: want, color, target };
+}
+
+// Ходить нечем, а место на поле есть (поле опустело — раздача сама состыковалась с последней плиткой, метла всё смела,
+// остались только скованные): раздача падает сама, пока не появится ход или поле не заполнится. Возвращает список таких раздач.
+function topUp(s, ev){
+  const out = [];
+  if (s.every <= 0) return out;
+  for (let q = 0; q < s.grid.length && !isWin(s) && !s.trayOver && !s.dead && s.grid.indexOf(0) >= 0 && legalMoves(s).length === 0; q++){
+    if (!s.next || s.next.cell < 0 || s.grid[s.next.cell] !== 0) planNext(s);
+    const sp = spawn(s, ev, 'extra' + q); if (!sp) break;
+    out.push(sp);
+  }
+  return out;
 }
 
 // Очередь заказов уровня: ручная (queue: ['h', 'cs'] — буквы цветов) или от сида: figs фигур заказами по 1..osz.
@@ -498,7 +512,7 @@ function makeState(li, spec, grid, w, h, seed, floor){
   const queue = genOrders(spec, seed);
   const s = { li, n: spec.n, w, h, grid, floor: floor || new Array(w * h).fill(0), seed,
     queue, show: spec.show || CFG.ORDER_SHOW, cap: spec.cap || CFG.TRAY_CAP, want: spec.want === undefined ? CFG.WANT : spec.want,
-    active: [], oi: 0, tray: [], served: 0, total: queue.reduce((n, o) => n + o.length, 0), trayOver: false,
+    active: [], oi: 0, tray: [], served: 0, total: queue.reduce((n, o) => n + o.length, 0), trayOver: false, capBonus: 0,
     crateGoal: spec.crateGoal || 0, hard: !!spec.hard,
     every: spec.every || 0, colors: spec.colors || 5, help: spec.help === undefined ? 0.8 : spec.help,
     vert: spec.vert || 0, rainbow: spec.rainbow || 0, timerP: spec.timerP || 0, timer: spec.timer || 8,
@@ -577,7 +591,7 @@ function applyMove(s, m){
   const j = slideDest(n.grid, n.w, n.h, i, d, n.floor);
   if (j === i) return null;
   n.grid[i] = 0; n.grid[j] = code; n.moves++;
-  const last = { from: i, to: j, dir: d, code, dist: Math.abs(j - i) / (d < 2 ? 1 : n.w), partner: -1, color: -1, target: null, spawn: null, ev: [] };
+  const last = { from: i, to: j, dir: d, code, dist: Math.abs(j - i) / (d < 2 ? 1 : n.w), partner: -1, color: -1, target: null, spawn: null, extra: [], ev: [] };
   const p = dockPartner(n.grid, n.w, n.h, j, code);
   if (p >= 0){ last.partner = p; last.partnerCode = n.grid[p]; const dk = dock(n, j, p, last.ev, 'move'); last.color = dk.color; last.target = dk.target; }
   if (!isWin(n) && !n.trayOver){
@@ -587,12 +601,15 @@ function applyMove(s, m){
       else if (n.next && n.grid[n.next.cell] !== 0) n.next.cell = nearestEmpty(n.grid, n.w, n.next.cell);  // искру заняли — переезжает
     }
   }
+  last.extra = topUp(n, last.ev);
   n.last = last;
   return n;
 }
 function goalProgress(s){ return { done: s.served + Math.min(s.crates, s.crateGoal), total: s.total + s.crateGoal }; }
 function isWin(s){ return !ordersLeft(s) && s.crates >= s.crateGoal; }
 function isLose(s){ return !isWin(s) && (s.dead || s.trayOver || legalMoves(s).length === 0); }
+// Почему проигран: 'tray' — фигура не влезла в лоток; 'timer' — окаменела; 'board' — поле забито; 'stuck' — тупик на уровне без раздачи (ходить нечем, а поле не полно).
+function loseWhy(s){ return !isLose(s) ? '' : s.trayOver ? 'tray' : s.dead ? 'timer' : s.grid.indexOf(0) < 0 ? 'board' : 'stuck'; }
 function dockMoves(s){ return legalMoves(s).filter(m => peekMove(s, m).partner >= 0); }
 function orderMoves(s){ return legalMoves(s).filter(m => { const k = moveKind(s, m); return k === 'order' || k === 'bonus'; }); }
 
@@ -616,6 +633,7 @@ function useMagnet(s){
   const p = magnetPair(s, true); if (!p) return null;
   const n = cloneState(s), ev = [], aCode = n.grid[p[0]], bCode = n.grid[p[1]], dk = dock(n, p[0], p[1], ev, 'boost');
   n.last = { boost: 'magnet', a: p[0], b: p[1], aCode, bCode, color: dk.color, target: dk.target, partner: -1, spawn: null, ev };
+  n.last.extra = topUp(n, ev);
   return n;
 }
 // Метла: сметает половинки из самого забитого ряда или столбца (камни и ящики остаются). Сметать нечего — null.
@@ -631,6 +649,14 @@ function useBroom(s){
   const n = cloneState(s), gone = [];
   for (let i = 0; i < n.grid.length; i++){ const x = i % n.w, y = (i - x) / n.w; if (n.grid[i] > 0 && (y === line.row || x === line.col)){ gone.push({ cell: i, code: n.grid[i] }); n.grid[i] = 0; } }
   n.last = { boost: 'broom', row: line.row, col: line.col, gone, partner: -1, spawn: null, ev: [] };
+  n.last.extra = topUp(n, n.last.ev);
+  return n;
+}
+// Рекламное место в лотке: +1 место до конца уровня, один раз за уровень (оболочка показывает его закрытой лункой).
+function addTraySlot(s){
+  if (s.capBonus || isWin(s) || isLose(s)) return null;
+  const n = cloneState(s); n.cap++; n.capBonus = 1;
+  n.last = { boost: 'slot', partner: -1, spawn: null, extra: [], ev: [] };
   return n;
 }
 // «Продолжить» после проигрыша (раз за уровень): лоток пуст, магнит стыкует REVIVE_PAIRS пар под заказ,
@@ -648,6 +674,7 @@ function revive(s){
   if (line) for (let i = 0; i < n.grid.length; i++){ const x = i % n.w, y = (i - x) / n.w; if (n.grid[i] > 0 && (y === line.row || x === line.col)){ gone.push({ cell: i, code: n.grid[i] }); n.grid[i] = 0; } }
   if (n.every > 0 && !isWin(n) && (!n.next || n.next.cell < 0 || n.grid[n.next.cell] !== 0)) planNext(n);
   n.last = { boost: 'revive', cleared, pairs, gone, row: line ? line.row : -1, col: line ? line.col : -1, partner: -1, spawn: null, ev };
+  n.last.extra = topUp(n, ev);
   return n;
 }
 
@@ -736,7 +763,7 @@ function playBot(s, policy, seed){
   }
   const pr = goalProgress(s);
   return { win: isWin(s), moves: s.moves, docks: s.docks, goal: pr.total, done: pr.done, obvious: steps ? withDock / steps : 0, firstDock,
-    full: isLose(s), why: !isLose(s) ? '' : s.trayOver ? 'tray' : s.dead ? 'dead' : 'board', trayPeak, danger };
+    full: isLose(s), why: loseWhy(s) === 'timer' ? 'dead' : loseWhy(s), trayPeak, danger };
 }
 function greedyPlay(s){ return playBot(s, 'greedy', 1); }
 function randomRun(li, seed){ return playBot(createState(li), 'random', seed); }
@@ -767,7 +794,7 @@ const G = {
   screen: 'menu',                // menu | game | help | win | lose
   save: Object.assign({ level: 0, muted: false, best: {}, unlockAll: false, boost: { magnet: CFG.BOOST_START, broom: CFG.BOOST_START } }, loadSave()),   // unlockAll — чит «открыть все уровни»; boost — запас бустеров
   slide: null,                   // { code, from, to, t0, t1 } — скользящая плитка
-  drop: null,                    // { code, cell, t0, t1 } — падающая раздача
+  drops: [],                     // [{ code, cell, t0, t1 }] — проявляющиеся раздачи (обычная и те, что упали сами, когда ходить было нечем)
   merges: [],                    // [{ aCell, bCell, aCode, bCode, vert, active, color, tShow, t0, t1, flyEnd, slot, target, combo }]
   parts: [],                     // частицы { x, y, vx, vy, t0, life, color, r }
   wiggle: null,                  // { cell, dir, t0, t1 } — вздрагивание плитки (тап или упор)
@@ -907,19 +934,22 @@ function goto(screen, payload){
       <div class="row"><button class="primary" data-act="next">Дальше</button><button data-act="retry">Ещё раз</button></div>`;
   }
   if (screen === 'lose'){
-    const s = G.s, canUndo = G.undoLeft > 0 && G.hist.length > 0, canRevive = !!s && !s.dead && !G.revived && isLose(s);
+    const s = G.s, canUndo = G.undoLeft > 0 && G.hist.length > 0, canRevive = !!s && !s.dead && !G.revived && isLose(s) && s.every > 0;
     const pr = s ? goalProgress(s) : { done: 0, total: 0 };
-    const title = s && s.dead ? 'Окаменела!' : s && s.trayOver ? 'Лоток переполнен' : 'Поле забито';
-    const why = s && s.dead ? 'Половинка с таймером не успела.' : s && s.trayOver ? 'Лишней фигуре не хватило места.' : 'Ходить больше некуда.';
+    const lw = s ? loseWhy(s) : 'board';
+    const title = lw === 'timer' ? 'Окаменела!' : lw === 'tray' ? 'Лоток переполнен' : lw === 'stuck' ? 'Тупик' : 'Поле забито';
+    const why = lw === 'timer' ? 'Половинка с таймером не успела.' : lw === 'tray' ? 'Лишней фигуре не хватило места.' : lw === 'stuck' ? 'Ходов не осталось.' : 'На поле не осталось пустых клеток.';
     if (canRevive) monet('offer', 'rv_revive', 'level=' + (s.li + 1) + ' left=' + (pr.total - pr.done));
     card.innerHTML = `<h2>${title}</h2><p>${why} Осталось собрать: ${pr.total - pr.done} из ${pr.total}.</p>
       ${canRevive ? `<div class="row"><button class="primary" data-act="revive">Продолжить · ▶ реклама</button></div><p class="note" style="margin-top:8px">Лоток опустеет, магнит соберёт ${CFG.REVIVE_PAIRS} пары под заказ, метла сметёт ряд. Раз за уровень; рекламы в прототипе нет.</p>` : ''}
       <div class="row"><button ${canRevive ? '' : 'class="primary"'} data-act="retry">Ещё раз</button>${canUndo ? `<button data-act="undo">Отменить ход (${G.undoLeft})</button>` : ''}<button data-act="menu">Меню</button></div>`;
   }
   if (screen === 'offer'){
-    const mag = G.offer === 'magnet';
-    card.innerHTML = `<h2>${mag ? 'Магниты кончились' : 'Мётлы кончились'}</h2><p>${mag ? 'Магнит стыкует пару под открытый заказ, где бы половинки ни стояли.' : 'Метла сметает половинки из самого забитого ряда или столбца.'}</p>
-      <p class="note">Посмотреть рекламу и получить +1? В прототипе рекламы нет — бустер выдаётся сразу.</p>
+    const T = { magnet: ['Магниты кончились', 'Магнит стыкует пару под открытый заказ, где бы половинки ни стояли.', 'Посмотреть рекламу и получить +1?'],
+      broom: ['Мётлы кончились', 'Метла сметает половинки из самого забитого ряда или столбца.', 'Посмотреть рекламу и получить +1?'],
+      slot: ['Ещё одно место в лотке', 'До конца уровня в лотке будет на одно место больше.', 'Посмотреть рекламу и открыть место?'] }[G.offer] || [];
+    card.innerHTML = `<h2>${T[0]}</h2><p>${T[1]}</p>
+      <p class="note">${T[2]} В прототипе рекламы нет — награда выдаётся сразу.</p>
       <div class="row"><button class="primary" data-act="ad-yes">▶ Смотреть · +1</button><button data-act="ad-no">Не надо</button></div>`;
   }
 }
@@ -937,7 +967,11 @@ $('card').addEventListener('click', (e) => {
   else if (act === 'retry'){ if (G.screen === 'lose' && G.s && !G.s.dead && !G.revived) monet('decline', 'rv_revive'); startLevel(G.s ? G.s.li : G.save.level); }
   else if (act === 'next'){ if (G.s && G.s.li + 1 >= CFG.INTER_FROM) monet('inter', 'inter_win', 'after level=' + (G.s.li + 1)); startLevel(G.s ? G.s.li + 1 : G.save.level); }
   else if (act === 'revive'){ monet('accept', 'rv_revive'); doRevive(); }
-  else if (act === 'ad-yes'){ monet('accept', 'rv_' + G.offer); G.save.boost[G.offer] = (G.save.boost[G.offer] || 0) + 1; save(); goto(G.s ? 'game' : 'menu'); hud(); toast(G.offer === 'magnet' ? '+1 магнит' : '+1 метла'); }
+  else if (act === 'ad-yes'){
+    monet('accept', 'rv_' + G.offer);
+    if (G.offer === 'slot'){ goto(G.s ? 'game' : 'menu'); openTraySlot(); }
+    else { G.save.boost[G.offer] = (G.save.boost[G.offer] || 0) + 1; save(); goto(G.s ? 'game' : 'menu'); hud(); toast(G.offer === 'magnet' ? '+1 магнит' : '+1 метла'); }
+  }
   else if (act === 'ad-no'){ monet('decline', 'rv_' + G.offer); goto(G.s ? 'game' : 'menu'); }
   else if (act === 'undo'){ goto('game'); undo(); }
   else if (act === 'help') goto('help');
@@ -957,7 +991,7 @@ function clearFx(hard){
   for (const f of G.fxOpen) if (!keep(f)) log('fx.end', f.name, 'cut');
   G.fxOpen = G.fxOpen.filter(keep);
   G.merges = hard ? [] : G.merges.filter(M => now >= M.t0);
-  G.slide = null; G.drop = null; G.wiggle = null; G.land = null; G.hit = null; G.ghosts = []; G.sweep = null;
+  G.slide = null; G.drops = []; G.wiggle = null; G.land = null; G.hit = null; G.ghosts = []; G.sweep = null;
   if (hard){ G.parts = []; G.praise = []; G.shake = null; G.combo = 0; G.crateFly = []; G.trayFlash = 0; }
   G.fxUntil = G.fxOpen.reduce((m, f) => Math.max(m, f.t1), 0);
 }
@@ -997,7 +1031,7 @@ function doMove(m){
   animateMove(next);
   hud();
   if (isWin(G.s)) log('event', 'level.win', 'moves=' + G.s.moves);
-  else if (isLose(G.s)) log('event', 'level.lose', 'moves=' + G.s.moves + ' done=' + goalProgress(G.s).done + ' why=' + (G.s.trayOver ? 'tray' : G.s.dead ? 'timer' : 'board'));
+  else if (isLose(G.s)) log('event', 'level.lose', 'moves=' + G.s.moves + ' done=' + goalProgress(G.s).done + ' why=' + loseWhy(G.s));
   return true;
 }
 function fxOpen(name, t1, info, ref){ G.fxOpen.push({ name, t1, ref }); log('fx.start', name, info); G.fxUntil = Math.max(G.fxUntil, t1); }
@@ -1039,19 +1073,30 @@ function animateMove(n){
     Audio.click(n.served, slideMs / 1000, G.combo); buzz([10, 30, 14]);
     tNext = t1 + CFG.DOCK_MS * 0.55 / ts;
   } else Audio.thunk(slideMs / 1000, L.dist);
-  if (L.spawn){
-    const S = L.spawn, d1 = tNext + CFG.SPAWN_MS / ts;
-    G.drop = { code: S.code, cell: S.cell, t0: tNext, t1: d1 };
-    fxOpen('drop', d1, 'cell=' + S.cell + (S.cell !== S.planned ? ' moved' : ''));
-    Audio.plop((tNext - T) / 1000);
-    if (S.partner >= 0){
-      tEnd = Math.max(tEnd, addMerge({ active: S.cell, partner: S.partner, code: S.code, partnerCode: S.partnerCode, color: S.color, target: S.target, tShow: T, t0: d1, combo: 1, kind: 'gift', evs: chain('spawn') }));
-      Audio.click(n.served, (d1 - T) / 1000, 1);
-    } else { const p = cellXY(S.cell, geo()); burst(8, p.x + geo().cell / 2, p.y + geo().cell * 0.9, d1, { type: 'dust', color: -1, angle: -Math.PI / 2, spread: 3, v: 0.07, life: 340, r: 3.5, g: 0 }); }
-  }
+  const sp = animateSpawns(L, T, tNext, n.served);
+  tEnd = Math.max(tEnd, sp);
   animateEvents(L, T, t1);
   if (isWin(n)) celebrate(Math.max(tEnd, G.merges.reduce((m, M) => Math.max(m, M.flyEnd), t1), G.crateFly.reduce((m, f) => Math.max(m, f.t1), 0)));
   else if (isLose(n) && !n.trayOver) shakeAt(Math.max(G.fxUntil, t1), 7);
+}
+// Раздачи после действия: обычная (L.spawn) и те, что упали сами, потому что ходить было нечем (L.extra). Идут по очереди с t0.
+// Каждая проявляется в своей клетке; состыковалась сама — «Подарок!». Возвращает время конца.
+function animateSpawns(L, T, t0, served){
+  const ts = G.timeScale, list = (L.spawn ? [{ S: L.spawn, by: 'spawn' }] : []).concat((L.extra || []).map((S, q) => ({ S, by: 'extra' + q })));
+  let t = t0, tEnd = t0;
+  for (const { S, by } of list){
+    const d1 = t + CFG.SPAWN_MS / ts, g = geo();
+    G.drops.push({ code: S.code, cell: S.cell, t0: t, t1: d1 });
+    fxOpen('drop', d1, 'cell=' + S.cell + (S.cell !== S.planned ? ' moved' : '') + (by !== 'spawn' ? ' auto' : ''));
+    Audio.plop((t - T) / 1000);
+    if (S.partner >= 0){
+      const chain = L.ev.filter(e => e.by === by && (e.type === 'done' || e.type === 'order' || e.type === 'untray'));
+      tEnd = Math.max(tEnd, addMerge({ active: S.cell, partner: S.partner, code: S.code, partnerCode: S.partnerCode, color: S.color, target: S.target, tShow: T, t0: d1, combo: 1, kind: 'gift', evs: chain }));
+      Audio.click(served, (d1 - T) / 1000, 1);
+    } else { const p = cellXY(S.cell, g); burst(8, p.x + g.cell / 2, p.y + g.cell * 0.9, d1, { type: 'dust', color: -1, angle: -Math.PI / 2, spread: 3, v: 0.07, life: 340, r: 3.5, g: 0 }); }
+    t = d1 + 60 / ts; tEnd = Math.max(tEnd, d1);
+  }
+  return tEnd;
 }
 // Победа: когда последняя фигура долетела в копилку — «Готово!», дождь конфетти, фанфара; карточка — после паузы.
 function celebrate(t){
@@ -1167,10 +1212,26 @@ function useBoost(kind){
   const T = performance.now(); G.lastInputT = T; G.hist = []; G.combo = 0; G.s = n;   // через бустер отмена не шагает
   log('event', 'boost.use', kind + ' left=' + G.save.boost[kind]);
   let tEnd = T;
-  if (kind === 'magnet'){ tEnd = animateMagnet(n.last, T, n.last.ev); animateEvents(n.last, T, T + CFG.MAGNET_MS / G.timeScale); }
+  if (kind === 'magnet'){ tEnd = animateMagnet(n.last, T, n.last.ev.filter(e => e.by === 'boost')); animateEvents(n.last, T, T + CFG.MAGNET_MS / G.timeScale); }
   else tEnd = animateBroom(n.last, T);
+  if (n.last.extra.length) tEnd = Math.max(tEnd, animateSpawns(n.last, T, tEnd + 80 / G.timeScale, n.served));   // поле опустело — раздача упала сама
   hud();
   if (isWin(n)){ log('event', 'level.win', 'moves=' + n.moves + ' by=' + kind); celebrate(Math.max(tEnd, G.merges.reduce((m, M) => Math.max(m, M.flyEnd), T))); }
+  return true;
+}
+// Рекламное место в лотке: закрытая лунка с плюсом после последнего места. Тап — предложение ролика (заглушка), согласие — +1 место до конца уровня.
+function adSlotOpen(s){ return !!s && s.every > 0 && !s.capBonus && s.li + 1 >= CFG.BOOST_FROM; }
+function trayPlaces(s){ return s.cap + (adSlotOpen(s) ? 1 : 0); }          // сколько лунок рисовать: места лотка и, если есть, рекламная
+function offerTraySlot(){
+  if (!G.s || G.screen !== 'game' || G.ending || !adSlotOpen(G.s) || isWin(G.s) || isLose(G.s)) return false;
+  G.offer = 'slot'; monet('offer', 'rv_slot', 'level=' + (G.s.li + 1) + ' tray=' + G.s.tray.length + '/' + G.s.cap); goto('offer'); return true;
+}
+function openTraySlot(){
+  const n = G.s && addTraySlot(G.s); if (!n) return false;
+  snapView(); clearFx(false); G.hist = []; G.s = n; snapView();          // через бустер отмена не шагает
+  const T = performance.now(), p = trayXY(n.cap - 1, geo()); G.lastInputT = T;
+  burst(14, p.x, p.y, T, { type: 'star', color: 2, v: 0.16, life: 520, r: 6, g: 0 });
+  Audio.order(0); buzz([10, 30, 14]); log('event', 'boost.use', 'slot cap=' + n.cap); hud();
   return true;
 }
 // Магнит: две половинки летят друг к другу и стыкуются посередине. L = { a, b, aCode, bCode, color, target }.
@@ -1210,6 +1271,7 @@ function doRevive(){
   for (const q of L.pairs){ addMerge({ active: q.a, partner: q.b, code: q.aCode, partnerCode: q.bCode, color: q.color, target: q.target, tShow: t, t0: t + CFG.MAGNET_MS / ts, combo: 1, kind: 'magnet', evs: [] }); t += CFG.MAGNET_MS * 0.9 / ts; }
   const tPairs = G.merges.reduce((m, M) => Math.max(m, M.flyEnd), t);
   if (L.gone.length){ const t0 = L.pairs.length ? t + 80 / ts : t; for (const q of L.gone) G.ghosts.push({ cell: q.cell, kind: 'piece', code: q.code, until: t0 }); vAt(t0, () => animateBroom(L, t0)); G.fxUntil = Math.max(G.fxUntil, t0 + CFG.BROOM_MS / ts); }
+  if (L.extra.length) for (const S of L.extra) G.drops.push({ code: S.code, cell: S.cell, t0: tPairs, t1: tPairs + CFG.SPAWN_MS / ts });
   vAt(tPairs + 30, () => { G.view = viewFromState(n); });           // пары могли закрыть заказы — к концу вид совпадает с ядром
   praise('Второй шанс!', W / 2, g.oy + g.bh * 0.42, T, P.accent, 34);
   Audio.revive(); buzz([20, 40, 20]);
@@ -1303,6 +1365,7 @@ function cellAt(p){
 cv.addEventListener('pointerdown', (e) => {
   Audio.init();
   if (!G.s || G.screen !== 'game' || G.drag) return;
+  if (adSlotOpen(G.s)){ const v = toVirtual(e), q = trayXY(G.s.cap, geo()); if (Math.hypot(v.x - q.x, v.y - q.y) <= q.r + 9){ log('input', 'tap', 'ad-slot'); offerTraySlot(); return; } }
   const i = cellAt(toVirtual(e));
   if (i < 0 || G.s.grid[i] <= 0) return;
   G.drag = { cell: i, sx: e.clientX, sy: e.clientY, id: e.pointerId, dir: -1, len: 0 }; G.kbd = false; G.lastInputT = performance.now();
@@ -1632,12 +1695,13 @@ function orderSlotXY(a, k, n, g){ const L = ordersLayout(g, { slot: a, n }), r =
 // Два вида на сравнение (сейв tray, кнопка в меню, ?tray=groove|side): паз по центру под полкой заказов или карман 2×2 в правом краю полки.
 function traySide(){ return G.save.tray === 'side'; }
 function trayRect(g){
-  if (traySide()){ const w = POCKET_STEP + 2 * POCKET_R + 2 * POCKET_PAD; return { x: g.px + g.pw - BAND_PAD - w, y: g.py + BAND_PAD, w, h: ORD_H }; }
-  const w = TRAY_PAD * 2 + TRAY_STEP * (G.s.cap - 1) + TRAY_S; return { x: W / 2 - w / 2, y: g.trayY, w, h: TRAY_H };
+  const n = trayPlaces(G.s);
+  if (traySide()){ const w = POCKET_STEP * (Math.ceil(n / 2) - 1) + 2 * POCKET_R + 2 * POCKET_PAD; return { x: g.px + g.pw - BAND_PAD - w, y: g.py + BAND_PAD, w, h: ORD_H }; }
+  const w = TRAY_PAD * 2 + TRAY_STEP * (n - 1) + TRAY_S; return { x: W / 2 - w / 2, y: g.trayY, w, h: TRAY_H };
 }
 function trayXY(k, g){
   const r = trayRect(g);
-  if (traySide()){ const col = k % 2, row = (k - col) / 2, rows = Math.ceil(G.s.cap / 2); return { x: r.x + POCKET_PAD + POCKET_R + col * POCKET_STEP, y: r.y + r.h / 2 + (row - (rows - 1) / 2) * POCKET_STEP, r: POCKET_R }; }
+  if (traySide()){ const row = k % 2, col = (k - row) / 2; return { x: r.x + POCKET_PAD + POCKET_R + col * POCKET_STEP, y: r.y + r.h / 2 + (row - 0.5) * POCKET_STEP, r: POCKET_R }; }   // карман заполняется столбиками по две лунки
   return { x: r.x + TRAY_PAD + TRAY_S / 2 + TRAY_STEP * k, y: r.y + r.h / 2, r: TRAY_S / 2 - 2 };
 }
 // Плавный сдвиг по горизонтали: карточка едет к новому месту ORDER_SHIFT_MS, а не прыгает (время абсолютное).
@@ -1740,6 +1804,15 @@ function drawTray(c, g, now, kind){
       c.save(); c.globalAlpha = 0.6 + 0.4 * Math.sin(now / 90); c.setLineDash([5, 4]); c.strokeStyle = '#fff'; c.lineWidth = 3; c.beginPath(); c.arc(p.x, p.y, p.r + 1, 0, Math.PI * 2); c.stroke(); c.restore();
     }
   }
+  if (adSlotOpen(s)){                                            // рекламное место: зелёная лунка с плюсом; зовёт, когда лоток почти полон
+    const p = trayXY(s.cap, g), call = n >= s.cap - 1 ? 0.5 + 0.5 * Math.sin(now / 200) : 0, k = 1 + 0.1 * call;
+    c.fillStyle = P.chipShadow; c.beginPath(); c.arc(p.x, p.y, p.r + 1, 0, Math.PI * 2); c.fill();
+    c.save(); c.setLineDash([4, 3]); c.strokeStyle = P.ok; c.lineWidth = 2; c.globalAlpha = 0.75 + 0.25 * call; c.beginPath(); c.arc(p.x, p.y, (p.r + 1) * k, 0, Math.PI * 2); c.stroke(); c.restore();
+    c.strokeStyle = P.ok; c.lineWidth = 3; c.lineCap = 'round'; const q = p.r * 0.42 * k;
+    c.beginPath(); c.moveTo(p.x - q, p.y); c.lineTo(p.x + q, p.y); c.moveTo(p.x, p.y - q); c.lineTo(p.x, p.y + q); c.stroke();
+    c.fillStyle = P.ok; c.beginPath(); c.arc(p.x + p.r * 0.78, p.y - p.r * 0.78, 6, 0, Math.PI * 2); c.fill();        // значок «ролик»
+    c.fillStyle = '#fff'; c.beginPath(); c.moveTo(p.x + p.r * 0.78 - 2, p.y - p.r * 0.78 - 3); c.lineTo(p.x + p.r * 0.78 + 3, p.y - p.r * 0.78); c.lineTo(p.x + p.r * 0.78 - 2, p.y - p.r * 0.78 + 3); c.closePath(); c.fill();
+  }
 }
 
 function render(){
@@ -1765,7 +1838,7 @@ function render(){
   }
   for (let i = 0; i < s.grid.length; i++){ const p = cellXY(i, g); ctx.fillStyle = P.slot; rr(ctx, p.x + cs * 0.05, p.y + cs * 0.05, cs * 0.9, cs * 0.9, cs * 0.18); ctx.fill(); if (s.floor[i] === HONEY) drawHoney(ctx, p.x, p.y, cs); }
   // искра следующей раздачи
-  if (s.every > 0 && s.next && s.next.cell >= 0 && !isWin(s) && !(G.drop && now < G.drop.t1)){ const p = cellXY(s.next.cell, g); drawSpark(ctx, p.x, p.y, cs, s.next.code, now); }
+  if (s.every > 0 && s.next && s.next.cell >= 0 && !isWin(s) && !G.drops.some(D => now < D.t1)){ const p = cellXY(s.next.cell, g); drawSpark(ctx, p.x, p.y, cs, s.next.code, now); }
   // превью свайпа: честный расчёт ядра — куда доедет и будет ли щёлк
   let ghost = null;
   if (G.drag && G.drag.dir >= 0){
@@ -1794,7 +1867,7 @@ function render(){
   // плитки из ядра; те, что сейчас в анимации, рисуют свои эффекты
   const skip = new Set();
   if (G.slide && now < G.slide.t1) skip.add(G.slide.to);
-  if (G.drop && now < G.drop.t1) skip.add(G.drop.cell);
+  for (const D of G.drops) if (now < D.t1) skip.add(D.cell);
   if (ghost){
     const p = cellXY(ghost.to, g);
     ctx.save(); ctx.setLineDash([6, 5]); ctx.lineWidth = 2.5; ctx.strokeStyle = ghost.kind === 'over' ? P.danger : ghost.kind === 'tray' ? P.honey : ghost.partner >= 0 ? P.accent : P.muted;
@@ -1875,9 +1948,10 @@ function render(){
     drawPiece(ctx, S.code, a.x + (b.x - a.x) * u, a.y + (b.y - a.y) * u, cs, 1, 1, S.dir < 2 ? 1 + st : 1 - st * 0.5, S.dir < 2 ? 1 - st * 0.5 : 1 + st);
   }
   // падение раздачи
-  if (G.drop && now < G.drop.t1){
+  for (const D of G.drops){
+    if (now >= D.t1) continue;
     // призрак в клетке становится плиткой: до начала — тот же призрак, затем плитка проявляется с лёгким отскоком
-    const D = G.drop, p = cellXY(D.cell, g);
+    const p = cellXY(D.cell, g);
     if (now < D.t0) drawSpark(ctx, p.x, p.y, cs, D.code, now);
     else {
       const u = (now - D.t0) / (D.t1 - D.t0), w = Math.min(1, u / 0.7), v = backOut(w), q = u < 0.7 ? 0 : Math.sin((u - 0.7) / 0.3 * Math.PI) * 0.12;
@@ -1963,7 +2037,7 @@ window.POLOVINKI = {
     orders: s.active.map(o => o && o.c.map((c, k) => (o.f[k] ? '+' : '') + LAYOUT_CHARS[c]).join(' ')), queueLeft: s.queue.length - s.oi,
     tray: s.tray.map(c => LAYOUT_CHARS[c]).join(''), cap: s.cap, crates: s.crates, crateGoal: s.crateGoal, progress: goalProgress(s), every: s.every,
     next: s.next, par: G.par, undoLeft: G.undoLeft, boost: { ...G.save.boost }, revived: G.revived, win: isWin(s), lose: isLose(s),
-    why: !isLose(s) ? '' : s.trayOver ? 'tray' : s.dead ? 'timer' : 'board', screen: G.screen, frameErrors } : { screen: G.screen }; },
+    why: loseWhy(s), adSlot: adSlotOpen(s), screen: G.screen, frameErrors } : { screen: G.screen }; },
   play(n){ startLevel(Math.max(1, n || 1) - 1); return this.state(); },
   move(cell, dir){ doMove(cell * 4 + (typeof dir === 'string' ? DIR_KEYS[dir] : dir)); return this.state(); },
   moves(){ return G.s ? legalMoves(G.s).map(m => ({ cell: m >> 2, dir: '→←↓↑'[m & 3], ...peekMove(G.s, m), kind: moveKind(G.s, m) })) : []; },
@@ -1971,7 +2045,9 @@ window.POLOVINKI = {
   magnet(){ useBoost('magnet'); return this.state(); },                       // бустеры и «Продолжить» — те же вызовы, что у кнопок
   broom(){ useBoost('broom'); return this.state(); },
   revive(){ doRevive(); return this.state(); },
-  tray(v){ setTray(v); return G.save.tray; },                                   // вид лотка: 'groove' | 'side'
+  tray(v){ setTray(v); return G.save.tray; },
+  adPos(){ if (!G.s || !adSlotOpen(G.s)) return null; const q = trayXY(G.s.cap, geo()), r = cv.getBoundingClientRect(); return { x: r.left + q.x * scale, y: r.top + q.y * scale }; },   // рекламная лунка в координатах окна
+  slot(){ openTraySlot(); return this.state(); },                               // открыть рекламное место в лотке (как после ролика)                                   // вид лотка: 'groove' | 'side'
   boosts(n){ G.save.boost = { magnet: n, broom: n }; save(); hud(); return G.save.boost; },   // задать запас бустеров (для проверки заглушки рекламы — 0)
   bot(policy, delayMs){                                                         // автоигра ботом ядра: greedy | docker | novice
     const step = () => { if (!G.s || G.screen !== 'game' || isWin(G.s) || isLose(G.s)) return; const r = mulberry32(G.s.moves + 5);
