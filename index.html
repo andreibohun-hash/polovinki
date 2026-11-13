@@ -115,6 +115,7 @@ const CFG = {
   TRAY_CAP: 4,         // мест в лотке: фигура, которую никто не заказал, ждёт здесь; не поместилась — проигрыш
   ORDER_SHOW: 2,       // сколько заказов открыто одновременно
   WANT: 0.5,           // доля раздач, цвет которых берётся из открытых заказов (остальные — любой цвет уровня)
+  DEAL: 'each',        // когда падает раздача: 'each' — после каждого хода; 'miss' — только после хода без стыковки; 'second' — через ход
   BOOST_START: 2,      // сколько каждого бустера (магнит, метла) лежит в сейве на старте
   REVIVE_PAIRS: 2,     // «Продолжить» после проигрыша: сколько пар под заказ магнит стыкует сам (плюс пустой лоток и метла)
   STAR3_K: 1.35,       // ★★★ — ходов не больше par × STAR3_K (par — лучшее, что нашёл луч солвера)
@@ -516,7 +517,7 @@ function makeState(li, spec, grid, w, h, seed, floor){
     crateGoal: spec.crateGoal || 0, hard: !!spec.hard,
     every: spec.every || 0, colors: spec.colors || 5, help: spec.help === undefined ? 0.8 : spec.help,
     vert: spec.vert || 0, rainbow: spec.rainbow || 0, timerP: spec.timerP || 0, timer: spec.timer || 8,
-    k: 0, moves: 0, docks: 0, crates: 0, dead: false, next: null, last: null };
+    deal: CFG.DEAL, k: 0, moves: 0, docks: 0, crates: 0, dead: false, next: null, last: null };
   for (let a = 0; a < s.show; a++) s.active.push(s.oi < queue.length ? newOrder(s) : null);
   if (s.every > 0) planNext(s);
   return s;
@@ -597,7 +598,8 @@ function applyMove(s, m){
   if (!isWin(n) && !n.trayOver){
     tickTimers(n, last.ev);
     if (n.every > 0){
-      if (n.moves % n.every === 0) last.spawn = spawn(n, last.ev);
+      const due = n.deal === 'miss' ? p < 0 : n.deal === 'second' ? n.moves % (n.every * 2) === 0 : n.moves % n.every === 0;
+      if (due) last.spawn = spawn(n, last.ev);
       else if (n.next && n.grid[n.next.cell] !== 0) n.next.cell = nearestEmpty(n.grid, n.w, n.next.cell);  // искру заняли — переезжает
     }
   }
@@ -897,6 +899,9 @@ const STARS = (k) => '★'.repeat(k) + '☆'.repeat(3 - k);
 function starsFor(s, par){ return par == null ? 3 : s.moves <= Math.ceil(par * CFG.STAR3_K) ? 3 : s.moves <= Math.ceil(par * CFG.STAR2_K) ? 2 : 1; }
 // Уровень открыт, если до него дошёл прогресс или включён чит «открыть все уровни».
 function isOpen(li){ return G.save.unlockAll || li <= G.save.level; }
+// Раздача на сравнение: 'miss' — новая половинка падает только после хода без стыковки (состыковал — призрак ждёт), 'each' — после каждого хода.
+// Таблица уровней подобрана под 'each'; выбор лежит в сейве и применяется со старта следующего уровня.
+function setDeal(v){ G.save.deal = v === 'each' ? 'each' : 'miss'; save(); log('event', 'deal.mode', G.save.deal); }
 // Вид лотка на сравнение: 'groove' — паз под заказами, 'side' — карман в правом краю полки заказов.
 function setTray(v){ G.save.tray = v === 'side' ? 'side' : 'groove'; save(); log('event', 'tray.style', G.save.tray); }
 function setUnlockAll(on){ G.save.unlockAll = !!on; save(); log('event', 'cheat', 'unlockAll=' + G.save.unlockAll); if (on) toast('Все уровни открыты'); }
@@ -917,14 +922,15 @@ function goto(screen, payload){
       <div class="row"><button class="primary" data-act="play">Играть · уровень ${G.save.level + 1}</button></div>
       <div class="levels">${lv}</div><div class="row"><button data-act="help">Как играть</button></div>
       <div class="row">${G.save.unlockAll ? '<button class="cheat" data-act="relock">Чит включён · закрыть обратно</button>' : '<button class="cheat" data-act="unlock">Чит: открыть все уровни</button>'}<button class="cheat" data-act="wipe">Сбросить прогресс</button></div>
-      <div class="row"><button class="cheat" data-act="tray">Лоток: ${G.save.tray === 'side' ? 'карман справа' : 'паз под заказами'} · сменить</button></div>`;
+      <div class="row"><button class="cheat" data-act="tray">Лоток: ${G.save.tray === 'side' ? 'карман справа' : 'паз под заказами'} · сменить</button>
+      <button class="cheat" data-act="deal">Раздача: ${G.save.deal === 'each' ? 'каждый ход' : 'только после хода без стыковки'} · сменить</button></div>`;
   }
   if (screen === 'help') card.innerHTML = `<h2>Как играть</h2><p style="text-align:left">
       • Свайп по плитке — она скользит до стены, камня или другой плитки.<br>
       • Левая половинка встала вплотную слева от правой того же цвета — щёлк, целая фигура.<br>
       • Фигура уходит в открытый заказ, которому она нужна. Закрой все заказы.<br>
       • Фигура, которую никто не заказал, ждёт в лотке и сама уйдёт в заказ, когда он откроется. Мест в лотке мало: не влезла — проигрыш.<br>
-      • После хода появляется новая половинка: её призрак на поле заранее показывает, какая и куда. Поле забилось — тоже проигрыш.<br>
+      • Призрак на поле показывает, какая половинка появится и где. Она появляется после хода без стыковки; состыковал — призрак ждёт. Поле забилось — тоже проигрыш.<br>
       • Бустеры: магнит стыкует пару под заказ, метла сметает самый забитый ряд.<br>
       • Дальше: верх/низ, мёд-стоп, радужная к любому цвету, ящики и цепи ломаются стыковкой рядом, таймер, тесный лоток.</p><button class="primary" data-act="back">Понятно</button>`;
   if (screen === 'win'){
@@ -963,7 +969,8 @@ $('card').addEventListener('click', (e) => {
   else if (act === 'lvl'){ if (isOpen(+el.dataset.li)) startLevel(+el.dataset.li); else { toast('Сначала пройди уровень ' + (G.save.level + 1)); Audio.nope(); } }
   else if (act === 'unlock' || act === 'relock'){ setUnlockAll(act === 'unlock'); goto('menu'); }
   else if (act === 'tray'){ setTray(G.save.tray === 'side' ? 'groove' : 'side'); goto('menu'); }
-  else if (act === 'wipe'){ G.save = { level: 0, muted: G.save.muted, tray: G.save.tray, best: {}, unlockAll: false, boost: { magnet: CFG.BOOST_START, broom: CFG.BOOST_START } }; save(); log('event', 'cheat', 'wipe'); hud(); goto('menu'); }
+  else if (act === 'deal'){ setDeal(G.save.deal === 'each' ? 'miss' : 'each'); goto('menu'); }
+  else if (act === 'wipe'){ G.save = { level: 0, muted: G.save.muted, tray: G.save.tray, deal: G.save.deal, best: {}, unlockAll: false, boost: { magnet: CFG.BOOST_START, broom: CFG.BOOST_START } }; save(); log('event', 'cheat', 'wipe'); hud(); goto('menu'); }
   else if (act === 'retry'){ if (G.screen === 'lose' && G.s && !G.s.dead && !G.revived) monet('decline', 'rv_revive'); startLevel(G.s ? G.s.li : G.save.level); }
   else if (act === 'next'){ if (G.s && G.s.li + 1 >= CFG.INTER_FROM) monet('inter', 'inter_win', 'after level=' + (G.s.li + 1)); startLevel(G.s ? G.s.li + 1 : G.save.level); }
   else if (act === 'revive'){ monet('accept', 'rv_revive'); doRevive(); }
@@ -997,6 +1004,7 @@ function clearFx(hard){
 }
 function startLevel(li){
   li = Math.max(0, li);
+  CFG.DEAL = G.save.deal === 'each' ? 'each' : 'miss';             // режим раздачи из сейва (по умолчанию — только после хода без стыковки)
   G.s = createState(li); G.s0 = G.s; G.hist = []; G.undoLeft = CFG.UNDO_PER_LEVEL; G.par = null;
   G.ending = 0; G.drag = null; G.winT = 0; G.revived = false; G.ordX = {}; snapView(); clearFx(true); G.levelT0 = performance.now(); G.lastInputT = G.levelT0; G.hintFor = null;
   Audio.intro(); log('fx.start', 'intro'); G.fxOpen.push({ name: 'intro', t1: G.levelT0 + CFG.INTRO_MS + CFG.INTRO_STEP * 12 });
@@ -2036,7 +2044,7 @@ window.POLOVINKI = {
   state(){ const s = G.s; return s ? { level: s.li + 1, hard: s.hard, rows: gridRows(s), moves: s.moves, docks: s.docks,
     orders: s.active.map(o => o && o.c.map((c, k) => (o.f[k] ? '+' : '') + LAYOUT_CHARS[c]).join(' ')), queueLeft: s.queue.length - s.oi,
     tray: s.tray.map(c => LAYOUT_CHARS[c]).join(''), cap: s.cap, crates: s.crates, crateGoal: s.crateGoal, progress: goalProgress(s), every: s.every,
-    next: s.next, par: G.par, undoLeft: G.undoLeft, boost: { ...G.save.boost }, revived: G.revived, win: isWin(s), lose: isLose(s),
+    deal: s.deal, next: s.next, par: G.par, undoLeft: G.undoLeft, boost: { ...G.save.boost }, revived: G.revived, win: isWin(s), lose: isLose(s),
     why: loseWhy(s), adSlot: adSlotOpen(s), screen: G.screen, frameErrors } : { screen: G.screen }; },
   play(n){ startLevel(Math.max(1, n || 1) - 1); return this.state(); },
   move(cell, dir){ doMove(cell * 4 + (typeof dir === 'string' ? DIR_KEYS[dir] : dir)); return this.state(); },
@@ -2046,6 +2054,7 @@ window.POLOVINKI = {
   broom(){ useBoost('broom'); return this.state(); },
   revive(){ doRevive(); return this.state(); },
   tray(v){ setTray(v); return G.save.tray; },
+  deal(v){ setDeal(v); return G.save.deal; },                                   // режим раздачи: 'miss' | 'each' (со следующего старта уровня)
   adPos(){ if (!G.s || !adSlotOpen(G.s)) return null; const q = trayXY(G.s.cap, geo()), r = cv.getBoundingClientRect(); return { x: r.left + q.x * scale, y: r.top + q.y * scale }; },   // рекламная лунка в координатах окна
   slot(){ openTraySlot(); return this.state(); },                               // открыть рекламное место в лотке (как после ролика)                                   // вид лотка: 'groove' | 'side'
   boosts(n){ G.save.boost = { magnet: n, broom: n }; save(); hud(); return G.save.boost; },   // задать запас бустеров (для проверки заглушки рекламы — 0)
@@ -2069,7 +2078,7 @@ window.POLOVINKI = {
 };
 
 // --- старт ---
-{ const q = /[?&]tray=(groove|side)/.exec(location.search); if (q) setTray(q[1]); }   // ?tray=side — сразу открыть нужный вид лотка
+{ const q = /[?&]tray=(groove|side)/.exec(location.search); if (q) setTray(q[1]); const d = /[?&]deal=(each|miss)/.exec(location.search); if (d) setDeal(d[1]); }   // ?tray=side — сразу открыть нужный вид лотка
 fit(); hud();
 const startHash = location.hash.slice(1) === 'unlock' ? (setUnlockAll(true), 'menu') : location.hash.slice(1);
 if (startHash === 'game') startLevel(G.save.level); else goto(startHash || 'menu');
