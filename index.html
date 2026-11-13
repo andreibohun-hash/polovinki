@@ -131,6 +131,7 @@ const CFG = {
   ORDER_IN_MS: 240,    // новая карточка заказа въезжает
   ORDER_SHIFT_MS: 180, // карточки съезжаются, когда соседняя стала уже, шире или ушла
   WANT_FLASH_MS: 800,  // вспышка свечения на плитках, чья фигура только что стала нужна заказу
+  SHINE_MS: 2400,      // за сколько блик пробегает по светящейся фигуре (и пауза до следующего)
   UNTRAY_MS: 380,      // фигура летит из лотка в заказ
   MAGNET_MS: 340,      // магнит стягивает две половинки друг к другу
   BROOM_MS: 420,       // метла проходит по ряду
@@ -1481,7 +1482,8 @@ function drawShape(c, col, cx, cy, R){
 // side 0 — левая (ровный край справа), 1 — правая (ровный край слева). edgeX — x ровного края.
 // Половинка code: целая фигура с центром на ровном крае (ex, ey), обрезанная по краю и по плитке (bx, by, bw, bh).
 // Стороны: 0 левая (край справа), 1 правая (край слева), 2 верхняя (край снизу), 3 нижняя (край сверху).
-function drawHalf(c, code, ex, ey, R, bx, by, bw, bh){
+// lit (0…1) — фигура сама светится: светлеет изнутри и по ней пробегает блик (t — время). Так отмечены половинки, нужные заказам.
+function drawHalf(c, code, ex, ey, R, bx, by, bw, bh, lit, tm){
   const side = sideOf(code), col = colorOf(code);
   c.save(); c.beginPath();
   if (side === 0) c.rect(bx, by, ex - bx, bh); else if (side === 1) c.rect(ex, by, bx + bw - ex, bh);
@@ -1491,6 +1493,15 @@ function drawHalf(c, code, ex, ey, R, bx, by, bw, bh){
   shapePath(c, col, ex, ey, R); c.clip(); c.fillStyle = 'rgba(255,255,255,0.55)'; const t = R * 0.07;
   if (side === 0) c.fillRect(ex - t, by, t, bh); else if (side === 1) c.fillRect(ex, by, t, bh);
   else if (side === 2) c.fillRect(bx, ey - t, bw, t); else c.fillRect(bx, ey, bw, t);
+  if (lit > 0){                                   // обрезка уже по самой половинке: всё ниже остаётся внутри фигуры, вокруг ничего не пачкает
+    const q = R * 0.42, gx = side === 0 ? ex - q : side === 1 ? ex + q : ex, gy = side === 2 ? ey - q : side === 3 ? ey + q : ey;   // середина половинки
+    const gr = c.createRadialGradient(gx, gy, 0, gx, gy, R * 0.8);                 // свет идёт из середины фигуры, края остаются сочными
+    gr.addColorStop(0, 'rgba(255,255,255,' + (0.75 * lit).toFixed(3) + ')'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+    c.fillStyle = gr; c.fillRect(bx, by, bw, bh);
+    const u = ((tm || 0) / CFG.SHINE_MS + ((bx + by) % 97) / 97) % 1, w = bw * 0.2, x = bx - bw * 0.6 + u * bw * 2.2, k = bh * 0.45;
+    c.fillStyle = 'rgba(255,255,255,' + (0.5 * lit).toFixed(3) + ')';
+    c.beginPath(); c.moveTo(x, by); c.lineTo(x + w, by); c.lineTo(x + w - k, by + bh); c.lineTo(x - k, by + bh); c.closePath(); c.fill();
+  }
   c.restore();
 }
 // Точка ровного края половинки в клетке (x, y) размера s с отступом pad.
@@ -1503,10 +1514,8 @@ function halfEdge(code, x, y, s, pad){
 // Плитка с половинкой в клетке (x, y) размера s. Ровный край половинки лежит на краю плитки —
 // две соседние плитки-пары показывают почти целую фигуру с зазором. Цепь и таймер рисуются поверх.
 // scl — общий масштаб, sx/sy — растяжение по осям (скольжение, сплющивание при остановке).
-// glow (0…1) — свечение фигуры в её цвет: так на поле отмечены половинки, которые нужны открытым заказам.
-const RGBA = {};                                    // '#rrggbb' + альфа → 'rgba(…)', с кэшем
-function rgba(hex, a){ const k = hex + a; if (!RGBA[k]){ const n = parseInt(hex.slice(1), 16); RGBA[k] = 'rgba(' + (n >> 16) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')'; } return RGBA[k]; }
-function drawPiece(c, code, x, y, s, alpha, scl, sx, sy, glow){
+// glow (0…1) и t — фигура светится сама (см. drawHalf): так на поле отмечены половинки, которые нужны открытым заказам.
+function drawPiece(c, code, x, y, s, alpha, scl, sx, sy, glow, t){
   const pad = s * 0.06, r = s * 0.2, cx = x + s / 2, cy = y + s / 2, kx = (scl || 1) * (sx || 1), ky = (scl || 1) * (sy || 1);
   c.save(); c.globalAlpha = alpha === undefined ? 1 : alpha;
   if (kx !== 1 || ky !== 1){ c.translate(cx, cy); c.scale(kx, ky); c.translate(-cx, -cy); }
@@ -1514,14 +1523,9 @@ function drawPiece(c, code, x, y, s, alpha, scl, sx, sy, glow){
   c.fillStyle = P.tile; rr(c, x + pad, y + pad, s - 2 * pad, s - 2 * pad, r); c.fill();
   c.fillStyle = 'rgba(255,255,255,0.7)'; rr(c, x + s * 0.18, y + pad + s * 0.035, s * 0.64, s * 0.07, s * 0.035); c.fill();   // блик сверху
   const e = halfEdge(code, x, y, s, pad);
-  if (glow > 0){                                   // ореол под фигурой, в пределах плитки: радиальный градиент дешевле тени с размытием
-    const col = P.colors[colorOf(code)], R = s * HALF_R * (1.25 + 0.3 * glow), gr = c.createRadialGradient(e.x, e.y, s * HALF_R * 0.55, e.x, e.y, R);
-    gr.addColorStop(0, rgba(col, 0.75 * glow)); gr.addColorStop(1, rgba(col, 0));
-    c.save(); rr(c, x + pad, y + pad, s - 2 * pad, s - 2 * pad, r); c.clip(); c.fillStyle = gr; c.fillRect(x, y, s, s); c.restore();
-  }
-  drawHalf(c, code, e.x, e.y, s * HALF_R, x + pad, y + pad, s - 2 * pad, s - 2 * pad);
+  drawHalf(c, code, e.x, e.y, s * HALF_R, x + pad, y + pad, s - 2 * pad, s - 2 * pad, glow, t);
   if (isChained(code)) drawChain(c, x, y, s);
-  const t = timerOf(code); if (t) drawTimer(c, code, t, x, y, s);
+  const tv = timerOf(code); if (tv) drawTimer(c, code, tv, x, y, s);
   c.restore();
 }
 // Цепь: два перекрещенных ряда звеньев и замочек — плитка не двигается.
@@ -1940,8 +1944,8 @@ function render(){
     if (ghost && ghost.partner === i) scl *= 1 + 0.06 * (0.5 + 0.5 * Math.sin(now / 80));
     const wc = colorOf(c), need = wc === RAINBOW ? wantAny : want[wc];      // нужна открытому заказу — фигура светится, после смены заказа вспыхивает
     let glow = 0;
-    if (need){ const fl = Math.max(0, 1 - (now - (G.wantT[wc] || 0)) / CFG.WANT_FLASH_MS); glow = 0.55 + 0.15 * Math.sin(now / 420 + i) + 0.3 * fl; scl *= 1 + 0.07 * Math.sin(fl * Math.PI); }
-    drawPiece(ctx, c, x, y, cs, 1, scl, sx, sy, glow);
+    if (need){ const fl = Math.max(0, 1 - (now - (G.wantT[wc] || 0)) / CFG.WANT_FLASH_MS); glow = 0.5 + 0.2 * Math.sin(now / 420 + i) + 0.3 * fl; scl *= 1 + 0.07 * Math.sin(fl * Math.PI); }
+    drawPiece(ctx, c, x, y, cs, 1, scl, sx, sy, glow, now);
     if (gh && gh.kind === 'chain'){ ctx.save(); ctx.globalAlpha = 1; drawChain(ctx, x, y, cs); ctx.restore(); }
     if (i === hintCell){ ctx.save(); ctx.globalAlpha = 0.45 + 0.45 * Math.abs(hintK); ctx.strokeStyle = P.accent; ctx.lineWidth = 3.5;
       rr(ctx, x + 1, y + 1, cs - 2, cs - 2, cs * 0.22); ctx.stroke(); ctx.restore(); }
