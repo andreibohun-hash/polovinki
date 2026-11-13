@@ -1275,17 +1275,18 @@ const VW = 400;                                    // виртуальная ш�
 let scale = 1, W = VW, H = 600, DPR = 1;
 function toVirtual(e){ const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) / scale, y: (e.clientY - r.top) / scale }; }
 // Раскладка сверху вниз: ряд заказов (плотная группа по центру), под ним по центру лоток, ниже поле. Группа по центру с уклоном вверх.
-const ORD_H = 46, ORD_GAP = 8, CHIP_R = 15, CHIP_STEP = 36, CARD_PAD = 14;   // карточка заказа облегает свои фишки: высота, зазор, радиус и шаг фишек, поля
-const NEXT_H = 30, NEXT_STEP = 16, NEXT_PAD = 14;                    // маленькая карточка «следующий заказ»: высота, шаг фигур, поля
+const ORD_H = 56, ORD_GAP = 8, CHIP_R = 20, CHIP_STEP = 47, CARD_PAD = 16;   // карточка заказа облегает свои фишки: высота, зазор, радиус и шаг фишек, поля
+const NEXT_H = 36, NEXT_STEP = 18, NEXT_PAD = 14;                    // маленькая карточка «следующий заказ»: высота, шаг фигур, поля
+const BAND_PAD = 9, BAND_H = ORD_H + 2 * BAND_PAD;                   // полка заказов во всю ширину: главный блок экрана, карточки стоят на ней
 const ZONE_GAP = 10, TRAY_H = 44, TRAY_S = 34, TRAY_STEP = 40, TRAY_PAD = 8;   // лоток: отступ от заказов, высота, место, шаг мест, поля
 const TOP_GAP = 16, BOTTOM_PAD = 18;                                  // зазор между лотком и полем; поле под рамкой
 function geo(){
-  const s = G.s, avail = H - 8, head = ORD_H + ZONE_GAP + TRAY_H + TOP_GAP;
+  const s = G.s, avail = H - 8, head = BAND_H + ZONE_GAP + TRAY_H + TOP_GAP;
   const cell = Math.min((W - 24) / s.w, (avail - head - BOTTOM_PAD) / s.h, 80);
   const bw = cell * s.w, bh = cell * s.h, group = head + bh + BOTTOM_PAD;
   const top = 6 + Math.max(0, (avail - group) * 0.4), ox = (W - bw) / 2;
   const px = 10, pw = W - 2 * px;                                     // заказы и лоток — во всю ширину кадра, даже когда поле на низком экране сужается
-  return { cell, ox, oy: top + head, bw, bh, py: top, px, pw, trayY: top + ORD_H + ZONE_GAP };
+  return { cell, ox, oy: top + head, bw, bh, py: top, px, pw, trayY: top + BAND_H + ZONE_GAP };
 }
 function cellXY(i, g){ const x = i % G.s.w; return { x: g.ox + x * g.cell, y: g.oy + (i - x) / G.s.w * g.cell }; }
 function cellAt(p){
@@ -1499,13 +1500,27 @@ function drawSpark(c, x, y, s, code, now){
   rr(c, x + s * 0.07, y + s * 0.07, s * 0.86, s * 0.86, s * 0.2); c.stroke();
   c.restore();
 }
-// Рука-подсказка на уроках: кружок «пальца» едет от плитки туда, где она остановится (dx, dy), и повторяет. t — время с начала показа.
+// Рука-подсказка на уроках: обычная рука с вытянутым указательным пальцем. Кончик пальца встаёт на плитку, «нажимает»
+// (круг под пальцем), ведёт туда, где плитка остановится (dx, dy), отпускает и повторяет. t — время с начала показа.
+// Силуэт из скруглённых частей: сначала все части обводятся тёмным, потом заливаются белым — обводка остаётся только по контуру.
+const HAND_PARTS = [[-7, -2, 14, 34, 7], [5, 15, 11, 20, 5.5], [14, 18, 11, 19, 5.5], [23, 22, 10, 17, 5], [-8, 24, 41, 30, 11]];   // палец, три костяшки, ладонь: x, y, w, h, r от кончика пальца
 function drawHand(c, x, y, dx, dy, t){
-  const ph = (t % 1500) / 1500, u = Math.min(1, ph / 0.7), a = ph < 0.8 ? 1 : 1 - (ph - 0.8) / 0.2, e = u * u * (3 - 2 * u);
-  const px = x + dx * e, py = y + dy * e;
-  c.save(); c.globalAlpha = 0.9 * a;
-  c.fillStyle = P.chipShadow; c.beginPath(); c.arc(px + 3, py + 5, 17, 0, Math.PI * 2); c.fill();
-  c.fillStyle = '#fff'; c.strokeStyle = P.pInk; c.lineWidth = 2.5; c.beginPath(); c.arc(px, py, 16, 0, Math.PI * 2); c.fill(); c.stroke();
+  const ph = (t % 1700) / 1700;
+  const press = Math.min(1, ph / 0.12), u = Math.max(0, Math.min(1, (ph - 0.14) / 0.56)), e = u * u * (3 - 2 * u), a = ph < 0.84 ? 1 : 1 - (ph - 0.84) / 0.16;
+  const px = x + dx * e, py = y + dy * e, down = ph > 0.1 && ph < 0.78;
+  c.save(); c.globalAlpha = a;
+  if (e > 0){ c.save(); c.globalAlpha = a * 0.35; c.strokeStyle = '#fff'; c.lineWidth = 9; c.lineCap = 'round'; c.beginPath(); c.moveTo(x, y); c.lineTo(px, py); c.stroke(); c.restore(); }   // след свайпа
+  if (down){ c.save(); c.globalAlpha = a * 0.55; c.strokeStyle = '#fff'; c.lineWidth = 3; c.beginPath(); c.arc(px, py, 13 + 3 * Math.sin(t / 110), 0, Math.PI * 2); c.stroke(); c.restore(); }   // палец прижат
+  const k = down ? 0.94 : 1.06 - 0.12 * press;
+  c.translate(px, py); c.rotate(-0.38); c.scale(1.15 * k, 1.15 * k);
+  c.save(); c.translate(3, 5); c.fillStyle = P.chipShadow; for (const q of HAND_PARTS){ rr(c, q[0], q[1], q[2], q[3], q[4]); c.fill(); } c.restore();
+  c.strokeStyle = P.pInk; c.lineWidth = 5; c.lineJoin = 'round';
+  for (const q of HAND_PARTS){ rr(c, q[0], q[1], q[2], q[3], q[4]); c.stroke(); }
+  c.save(); c.translate(-12, 34); c.rotate(-0.7); rr(c, -9, -6.5, 20, 13, 6.5); c.stroke(); c.fillStyle = '#fff'; c.fill(); c.restore();   // большой палец
+  c.fillStyle = '#fff'; for (const q of HAND_PARTS){ rr(c, q[0], q[1], q[2], q[3], q[4]); c.fill(); }
+  c.save(); c.translate(-12, 34); c.rotate(-0.7); rr(c, -6, -4.5, 17, 9, 4.5); c.fill(); c.restore();
+  c.strokeStyle = P.pInk; c.lineWidth = 2; c.lineCap = 'round'; c.globalAlpha = a * 0.45;
+  for (const lx of [10.5, 19.5]){ c.beginPath(); c.moveTo(lx, 24); c.lineTo(lx, 33); c.stroke(); }   // складки между костяшками
   c.restore();
 }
 // Ход, который рука показывает на уроке: без раздачи — первый ход решения солвера, с раздачей — выбор жадного бота. Тот же расчёт ядра, не догадка.
@@ -1584,7 +1599,8 @@ const ease = (u) => u < 0 ? 0 : u > 1 ? 1 : 1 - (1 - u) * (1 - u);
 const easeIO = (u) => u < 0 ? 0 : u > 1 ? 1 : u * u * (3 - 2 * u);
 
 function plural(n, one, few, many){ const a = n % 10, b = n % 100; return a === 1 && b !== 11 ? one : a >= 2 && a <= 4 && (b < 12 || b > 14) ? few : many; }
-// Ряд заказов. Карточка облегает свои фишки (большой плашки с одной фигурой посередине нет); открытые карточки и маленькая
+// Ряд заказов стоит на тёмной полке во всю ширину — это главный блок экрана. Карточка облегает свои крупные фишки
+// (большой плашки с одной фигурой посередине нет) и обведена акцентом; открытые карточки и маленькая
 // карточка следующего заказа стоят плотной группой по центру экрана. Три больших заказа не помещаются — группа ужимается целиком (f).
 // own = { slot, n }: считать, что в месте slot стоит заказ на n фигур — для полёта в заказ, которого на экране ещё нет.
 function ordersLayout(g, own){
@@ -1594,16 +1610,16 @@ function ordersLayout(g, own){
   let total = nextW, cnt = nextW ? 1 : 0;
   for (const n of ns) if (n){ total += n * CHIP_STEP + CARD_PAD; cnt++; }
   total += ORD_GAP * Math.max(0, cnt - 1);
-  const f = total > g.pw ? g.pw / total : 1, out = { f, cards: [], next: null };
+  const room = g.pw - 2 * BAND_PAD - 6, f = total > room ? room / total : 1, out = { f, cards: [], next: null };
   let x = W / 2 - total * f / 2;
   for (const n of ns){
     if (!n){ out.cards.push(null); continue; }
-    const w = (n * CHIP_STEP + CARD_PAD) * f; out.cards.push({ x, y: g.py, w, h: ORD_H }); x += w + ORD_GAP * f;
+    const w = (n * CHIP_STEP + CARD_PAD) * f; out.cards.push({ x, y: g.py + BAND_PAD, w, h: ORD_H }); x += w + ORD_GAP * f;
   }
-  if (nextW) out.next = { x, y: g.py + (ORD_H - NEXT_H) / 2, w: nextW * f, h: NEXT_H };
+  if (nextW) out.next = { x, y: g.py + BAND_PAD + (ORD_H - NEXT_H) / 2, w: nextW * f, h: NEXT_H };
   return out;
 }
-function cardRect(a, g, n){ return ordersLayout(g, n ? { slot: a, n } : null).cards[a] || { x: W / 2, y: g.py, w: 0, h: ORD_H }; }
+function cardRect(a, g, n){ return ordersLayout(g, n ? { slot: a, n } : null).cards[a] || { x: W / 2, y: g.py + BAND_PAD, w: 0, h: ORD_H }; }
 function orderSlotXY(a, k, n, g){ const L = ordersLayout(g, { slot: a, n }), r = L.cards[a], step = CHIP_STEP * L.f; return { x: r.x + r.w / 2 - step * (n - 1) / 2 + step * k, y: r.y + r.h / 2, r: CHIP_R * L.f }; }
 // Лоток — отдельная зона по центру под всем рядом заказов: он общий запас, а не часть какой-то одной карточки.
 function trayRect(g){ const w = TRAY_PAD * 2 + TRAY_STEP * (G.s.cap - 1) + TRAY_S; return { x: W / 2 - w / 2, y: g.trayY, w, h: TRAY_H }; }
@@ -1643,6 +1659,8 @@ function drawCheckBadge(c, x, y, r){
 function drawOrders(c, g, now, hl){
   const s = G.s, V = G.view, ts = G.timeScale, L = ordersLayout(g), step = CHIP_STEP * L.f, cr = CHIP_R * L.f;
   const intro = now < G.levelT0 + 1300 ? Math.max(0, Math.sin((now - G.levelT0) / 1300 * Math.PI * 3)) : 0;
+  c.fillStyle = P.shadow; rr(c, g.px, g.py + 4, g.pw, BAND_H, 18); c.fill();        // полка заказов: тот же язык, что у поля
+  c.fillStyle = P.board; rr(c, g.px, g.py, g.pw, BAND_H, 18); c.fill();
   for (let a = 0; a < s.show; a++){
     const card = V.cards[a], r = L.cards[a];
     if (!card || !r) continue;                                   // очередь кончилась — пустое место не рисуем
@@ -1651,9 +1669,9 @@ function drawOrders(c, g, now, hl){
     if (card.done) k = 1 + 0.14 * Math.sin(Math.min(1, (now - card.done) / (CFG.ORDER_DONE_MS / ts)) * Math.PI);
     else if (card.born && now < card.born + CFG.ORDER_IN_MS / ts) k = 0.55 + 0.45 * backOut((now - card.born) / (CFG.ORDER_IN_MS / ts));
     c.save(); c.translate(cx, cy); c.scale(k, k); c.translate(-cx, -cy);
-    c.fillStyle = P.paperShadow; rr(c, x, r.y + 3, r.w, r.h, 14); c.fill();
-    c.fillStyle = card.done ? P.okBg : P.paper; rr(c, x, r.y, r.w, r.h, 14); c.fill();
-    if (card.done || intro){ c.save(); c.globalAlpha = card.done ? 1 : intro; c.strokeStyle = card.done ? P.ok : P.accent; c.lineWidth = 3; rr(c, x, r.y, r.w, r.h, 14); c.stroke(); c.restore(); }
+    c.fillStyle = P.shadow; rr(c, x, r.y + 4, r.w, r.h, 16); c.fill();
+    c.fillStyle = card.done ? P.okBg : P.paper; rr(c, x, r.y, r.w, r.h, 16); c.fill();
+    c.strokeStyle = card.done ? P.ok : P.accent; c.lineWidth = 3 + 2.5 * intro; rr(c, x, r.y, r.w, r.h, 16); c.stroke();   // акцентная обводка: заказ — цель, а не фон
     card.c.forEach((col, i) => {
       const px = cx - step * (n - 1) / 2 + step * i;
       if (card.f[i]){
@@ -1662,8 +1680,8 @@ function drawOrders(c, g, now, hl){
         return;
       }
       c.fillStyle = P.pSlot; c.beginPath(); c.arc(px, cy, cr, 0, Math.PI * 2); c.fill();
-      c.save(); c.globalAlpha = 0.55; drawShape(c, col, px, cy, cr * 0.66); c.restore();
-      c.save(); c.setLineDash([3, 3]); c.strokeStyle = P.pMuted; c.lineWidth = 1.5; c.beginPath(); c.arc(px, cy, cr, 0, Math.PI * 2); c.stroke(); c.restore();
+      c.save(); c.globalAlpha = 0.8; drawShape(c, col, px, cy, cr * 0.68); c.restore();
+      c.save(); c.setLineDash([4, 3]); c.strokeStyle = P.pMuted; c.lineWidth = 2; c.beginPath(); c.arc(px, cy, cr, 0, Math.PI * 2); c.stroke(); c.restore();
       if (hl && hl.slot === a && hl.k === i && hl.id === card.id){
         c.save(); c.globalAlpha = 0.6 + 0.4 * Math.sin(now / 90); c.strokeStyle = P.accent; c.lineWidth = 3.5; c.beginPath(); c.arc(px, cy, cr + 3, 0, Math.PI * 2); c.stroke(); c.restore();
       }
@@ -1674,7 +1692,7 @@ function drawOrders(c, g, now, hl){
   if (nx && L.next){
     const r = L.next, x = easeX('n' + V.oi, r.x, now), more = s.queue.length - V.oi - 1, st = NEXT_STEP * L.f, x0 = x + r.w / 2 - st * (nx.length - 1) / 2;
     c.save(); c.globalAlpha = 0.72; c.fillStyle = P.paper; rr(c, x, r.y, r.w, r.h, 10); c.fill(); c.restore();
-    nx.forEach((col, k) => drawShape(c, col, x0 + st * k, r.y + r.h / 2, 6.5 * L.f));
+    nx.forEach((col, k) => drawShape(c, col, x0 + st * k, r.y + r.h / 2, 7.5 * L.f));
     if (more > 0){
       c.fillStyle = P.accent; c.beginPath(); c.arc(x + r.w - 2, r.y, 10, 0, Math.PI * 2); c.fill();
       c.fillStyle = '#fff'; c.font = '800 11px system-ui, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText('+' + more, x + r.w - 2, r.y + 0.5); c.textBaseline = 'alphabetic';
@@ -1903,7 +1921,7 @@ function render(){
     if (G.handFor !== s){ G.handFor = s; G.handMove = lessonMove(s); G.handT0 = now; if (G.handMove >= 0) log('fx.start', 'hand', 'cell=' + (G.handMove >> 2) + ' dir=' + '→←↓↑'[G.handMove & 3]); }
     if (G.handMove >= 0){
       const a = cellXY(G.handMove >> 2, g), b = cellXY(peekMove(s, G.handMove).to, g);
-      drawHand(ctx, a.x + cs * 0.5, a.y + cs * 0.62, b.x - a.x, b.y - a.y, now - G.handT0);
+      drawHand(ctx, a.x + cs * 0.5, a.y + cs * 0.55, b.x - a.x, b.y - a.y, now - G.handT0);
     }
   }
   // журнал fx.end и финал — по состоянию в кадре, не по событию (урок «Стыковки»)
