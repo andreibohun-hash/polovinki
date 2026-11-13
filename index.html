@@ -130,6 +130,7 @@ const CFG = {
   ORDER_DONE_MS: 320,  // закрытая карточка заказа празднует и уходит
   ORDER_IN_MS: 240,    // новая карточка заказа въезжает
   ORDER_SHIFT_MS: 180, // карточки съезжаются, когда соседняя стала уже, шире или ушла
+  WANT_FLASH_MS: 800,  // вспышка свечения на плитках, чья фигура только что стала нужна заказу
   UNTRAY_MS: 380,      // фигура летит из лотка в заказ
   MAGNET_MS: 340,      // магнит стягивает две половинки друг к другу
   BROOM_MS: 420,       // метла проходит по ряду
@@ -821,6 +822,7 @@ const G = {
   ending: 0,                     // когда показать win/lose; 0 — не ждём
   drag: null,                    // { cell, sx, sy, id, dir }
   levelT0: 0,                    // старт уровня (пульс панели цели)
+  wantPrev: [], wantT: [],       // свечение нужных фигур: были ли нужны в прошлом кадре и когда стали нужны (вспышка)
   ordX: {},                      // плавный сдвиг карточек заказов по горизонтали: ключ карточки → { from, to, t0 }
   handFor: null, handMove: -1, handT0: 0,   // рука на уроке: для какого состояния посчитана, какой ход, с какого момента едет
   cursor: 0, kbd: false,         // клавиатурный курсор (отладка на десктопе)
@@ -1006,7 +1008,7 @@ function startLevel(li){
   li = Math.max(0, li);
   CFG.DEAL = G.save.deal === 'each' ? 'each' : 'miss';             // режим раздачи из сейва (по умолчанию — только после хода без стыковки)
   G.s = createState(li); G.s0 = G.s; G.hist = []; G.undoLeft = CFG.UNDO_PER_LEVEL; G.par = null;
-  G.ending = 0; G.drag = null; G.winT = 0; G.revived = false; G.ordX = {}; snapView(); clearFx(true); G.levelT0 = performance.now(); G.lastInputT = G.levelT0; G.hintFor = null;
+  G.ending = 0; G.drag = null; G.winT = 0; G.revived = false; G.ordX = {}; G.wantPrev = []; G.wantT = []; snapView(); clearFx(true); G.levelT0 = performance.now(); G.lastInputT = G.levelT0; G.hintFor = null;
   Audio.intro(); log('fx.start', 'intro'); G.fxOpen.push({ name: 'intro', t1: G.levelT0 + CFG.INTRO_MS + CFG.INTRO_STEP * 12 });
   G.cursor = G.s.grid.findIndex(c => c > 0);
   const spec = levelSpec(li);
@@ -1501,7 +1503,10 @@ function halfEdge(code, x, y, s, pad){
 // Плитка с половинкой в клетке (x, y) размера s. Ровный край половинки лежит на краю плитки —
 // две соседние плитки-пары показывают почти целую фигуру с зазором. Цепь и таймер рисуются поверх.
 // scl — общий масштаб, sx/sy — растяжение по осям (скольжение, сплющивание при остановке).
-function drawPiece(c, code, x, y, s, alpha, scl, sx, sy){
+// glow (0…1) — свечение фигуры в её цвет: так на поле отмечены половинки, которые нужны открытым заказам.
+const RGBA = {};                                    // '#rrggbb' + альфа → 'rgba(…)', с кэшем
+function rgba(hex, a){ const k = hex + a; if (!RGBA[k]){ const n = parseInt(hex.slice(1), 16); RGBA[k] = 'rgba(' + (n >> 16) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')'; } return RGBA[k]; }
+function drawPiece(c, code, x, y, s, alpha, scl, sx, sy, glow){
   const pad = s * 0.06, r = s * 0.2, cx = x + s / 2, cy = y + s / 2, kx = (scl || 1) * (sx || 1), ky = (scl || 1) * (sy || 1);
   c.save(); c.globalAlpha = alpha === undefined ? 1 : alpha;
   if (kx !== 1 || ky !== 1){ c.translate(cx, cy); c.scale(kx, ky); c.translate(-cx, -cy); }
@@ -1509,6 +1514,11 @@ function drawPiece(c, code, x, y, s, alpha, scl, sx, sy){
   c.fillStyle = P.tile; rr(c, x + pad, y + pad, s - 2 * pad, s - 2 * pad, r); c.fill();
   c.fillStyle = 'rgba(255,255,255,0.7)'; rr(c, x + s * 0.18, y + pad + s * 0.035, s * 0.64, s * 0.07, s * 0.035); c.fill();   // блик сверху
   const e = halfEdge(code, x, y, s, pad);
+  if (glow > 0){                                   // ореол под фигурой, в пределах плитки: радиальный градиент дешевле тени с размытием
+    const col = P.colors[colorOf(code)], R = s * HALF_R * (1.25 + 0.3 * glow), gr = c.createRadialGradient(e.x, e.y, s * HALF_R * 0.55, e.x, e.y, R);
+    gr.addColorStop(0, rgba(col, 0.75 * glow)); gr.addColorStop(1, rgba(col, 0));
+    c.save(); rr(c, x + pad, y + pad, s - 2 * pad, s - 2 * pad, r); c.clip(); c.fillStyle = gr; c.fillRect(x, y, s, s); c.restore();
+  }
   drawHalf(c, code, e.x, e.y, s * HALF_R, x + pad, y + pad, s - 2 * pad, s - 2 * pad);
   if (isChained(code)) drawChain(c, x, y, s);
   const t = timerOf(code); if (t) drawTimer(c, code, t, x, y, s);
@@ -1872,6 +1882,11 @@ function render(){
     }
     if (G.hintMove >= 0){ hintCell = G.hintMove >> 2; hintDir = G.hintMove & 3; const ph = (idle % 1400) / 1400; hintK = ph < 0.4 ? Math.sin(ph / 0.4 * Math.PI * 2) : 0; }
   }
+  // какие фигуры нужны открытым заказам (по тому, что сейчас видно на карточках): их половинки на поле светятся
+  const want = [false, false, false, false, false]; let wantAny = false;
+  for (const cd of G.view.cards) if (cd && !cd.done) cd.c.forEach((col, k) => { if (!cd.f[k]){ want[col] = true; wantAny = true; } });
+  for (let col = 0; col < 5; col++){ if (want[col] && !G.wantPrev[col]) G.wantT[col] = now; G.wantPrev[col] = want[col]; }
+  if (wantAny && !G.wantPrev[5]) G.wantT[5] = now; G.wantPrev[5] = wantAny;
   // плитки из ядра; те, что сейчас в анимации, рисуют свои эффекты
   const skip = new Set();
   if (G.slide && now < G.slide.t1) skip.add(G.slide.to);
@@ -1923,7 +1938,10 @@ function render(){
       if (G.drag.dir >= 0){ const pull = Math.min(cs * CFG.DRAG_PULL, G.drag.len / scale * 0.25); x += DIRS[G.drag.dir][0] * pull; y += DIRS[G.drag.dir][1] * pull; }
     }
     if (ghost && ghost.partner === i) scl *= 1 + 0.06 * (0.5 + 0.5 * Math.sin(now / 80));
-    drawPiece(ctx, c, x, y, cs, 1, scl, sx, sy);
+    const wc = colorOf(c), need = wc === RAINBOW ? wantAny : want[wc];      // нужна открытому заказу — фигура светится, после смены заказа вспыхивает
+    let glow = 0;
+    if (need){ const fl = Math.max(0, 1 - (now - (G.wantT[wc] || 0)) / CFG.WANT_FLASH_MS); glow = 0.55 + 0.15 * Math.sin(now / 420 + i) + 0.3 * fl; scl *= 1 + 0.07 * Math.sin(fl * Math.PI); }
+    drawPiece(ctx, c, x, y, cs, 1, scl, sx, sy, glow);
     if (gh && gh.kind === 'chain'){ ctx.save(); ctx.globalAlpha = 1; drawChain(ctx, x, y, cs); ctx.restore(); }
     if (i === hintCell){ ctx.save(); ctx.globalAlpha = 0.45 + 0.45 * Math.abs(hintK); ctx.strokeStyle = P.accent; ctx.lineWidth = 3.5;
       rr(ctx, x + 1, y + 1, cs - 2, cs - 2, cs * 0.22); ctx.stroke(); ctx.restore(); }
