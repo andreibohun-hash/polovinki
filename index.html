@@ -17,7 +17,7 @@
   --board:#434986; --slot:#4e5596; --tile:#fffdf7; --tile-shadow:#2c3066; --stone:#8d93bd; --stone-dark:#6f75a3;
   --c0:#ff5470; --c1:#3b8cff; --c2:#ffb81f; --c3:#2fbf71; --c4:#9b5cff;
   --paper:#fff4d9; --paper-shadow:#3e4480; --panel-ink:#3b3340; --panel-muted:#b3a487; --panel-slot:#efdfba;   /* карточка заказа: бумага, тень, чернила, пунктир, лунка */
-  --tray:#f0a13a; --tray-dark:#b8721c; --tray-hole:#d2861f;                                                  /* лоток: корпус, тень, лунка */
+  --tray:#ffb347;                                                                                             /* лоток: янтарная кромка «осталось одно место» (сам лоток — тихий паз в тонах поля) */
   --chip:#ffffff; --chip-shadow:rgba(30,30,70,.25);                                                           /* фишка: целая фигура на белом кружке */
   --honey:#f7b733; --wood:#c98b4f; --wood-dark:#8f5a2b; --steel:#7d8494; --ok:#2fbf71; --ok-bg:#d9f5e4;
   --frame-w:430px;
@@ -870,6 +870,8 @@ const STARS = (k) => '★'.repeat(k) + '☆'.repeat(3 - k);
 function starsFor(s, par){ return par == null ? 3 : s.moves <= Math.ceil(par * CFG.STAR3_K) ? 3 : s.moves <= Math.ceil(par * CFG.STAR2_K) ? 2 : 1; }
 // Уровень открыт, если до него дошёл прогресс или включён чит «открыть все уровни».
 function isOpen(li){ return G.save.unlockAll || li <= G.save.level; }
+// Вид лотка на сравнение: 'groove' — паз под заказами, 'side' — карман в правом краю полки заказов.
+function setTray(v){ G.save.tray = v === 'side' ? 'side' : 'groove'; save(); log('event', 'tray.style', G.save.tray); }
 function setUnlockAll(on){ G.save.unlockAll = !!on; save(); log('event', 'cheat', 'unlockAll=' + G.save.unlockAll); if (on) toast('Все уровни открыты'); }
 function goto(screen, payload){
   G.screen = screen; log('screen', screen);
@@ -887,7 +889,8 @@ function goto(screen, payload){
     card.innerHTML = `<h2>Половинки</h2><p>Свайпни половинку — она скользит до упора. Собирай фигуры под заказы; лишнее ждёт в лотке. Красная рамка — сложный уровень.</p>
       <div class="row"><button class="primary" data-act="play">Играть · уровень ${G.save.level + 1}</button></div>
       <div class="levels">${lv}</div><div class="row"><button data-act="help">Как играть</button></div>
-      <div class="row">${G.save.unlockAll ? '<button class="cheat" data-act="relock">Чит включён · закрыть обратно</button>' : '<button class="cheat" data-act="unlock">Чит: открыть все уровни</button>'}<button class="cheat" data-act="wipe">Сбросить прогресс</button></div>`;
+      <div class="row">${G.save.unlockAll ? '<button class="cheat" data-act="relock">Чит включён · закрыть обратно</button>' : '<button class="cheat" data-act="unlock">Чит: открыть все уровни</button>'}<button class="cheat" data-act="wipe">Сбросить прогресс</button></div>
+      <div class="row"><button class="cheat" data-act="tray">Лоток: ${G.save.tray === 'side' ? 'карман справа' : 'паз под заказами'} · сменить</button></div>`;
   }
   if (screen === 'help') card.innerHTML = `<h2>Как играть</h2><p style="text-align:left">
       • Свайп по плитке — она скользит до стены, камня или другой плитки.<br>
@@ -929,7 +932,8 @@ $('card').addEventListener('click', (e) => {
   if (act === 'play') startLevel(G.save.level);
   else if (act === 'lvl'){ if (isOpen(+el.dataset.li)) startLevel(+el.dataset.li); else { toast('Сначала пройди уровень ' + (G.save.level + 1)); Audio.nope(); } }
   else if (act === 'unlock' || act === 'relock'){ setUnlockAll(act === 'unlock'); goto('menu'); }
-  else if (act === 'wipe'){ G.save = { level: 0, muted: G.save.muted, best: {}, unlockAll: false, boost: { magnet: CFG.BOOST_START, broom: CFG.BOOST_START } }; save(); log('event', 'cheat', 'wipe'); hud(); goto('menu'); }
+  else if (act === 'tray'){ setTray(G.save.tray === 'side' ? 'groove' : 'side'); goto('menu'); }
+  else if (act === 'wipe'){ G.save = { level: 0, muted: G.save.muted, tray: G.save.tray, best: {}, unlockAll: false, boost: { magnet: CFG.BOOST_START, broom: CFG.BOOST_START } }; save(); log('event', 'cheat', 'wipe'); hud(); goto('menu'); }
   else if (act === 'retry'){ if (G.screen === 'lose' && G.s && !G.s.dead && !G.revived) monet('decline', 'rv_revive'); startLevel(G.s ? G.s.li : G.save.level); }
   else if (act === 'next'){ if (G.s && G.s.li + 1 >= CFG.INTER_FROM) monet('inter', 'inter_win', 'after level=' + (G.s.li + 1)); startLevel(G.s ? G.s.li + 1 : G.save.level); }
   else if (act === 'revive'){ monet('accept', 'rv_revive'); doRevive(); }
@@ -1278,10 +1282,12 @@ function toVirtual(e){ const r = cv.getBoundingClientRect(); return { x: (e.clie
 const ORD_H = 56, ORD_GAP = 8, CHIP_R = 20, CHIP_STEP = 47, CARD_PAD = 16;   // карточка заказа облегает свои фишки: высота, зазор, радиус и шаг фишек, поля
 const NEXT_H = 36, NEXT_STEP = 18, NEXT_PAD = 14;                    // маленькая карточка «следующий заказ»: высота, шаг фигур, поля
 const BAND_PAD = 9, BAND_H = ORD_H + 2 * BAND_PAD;                   // полка заказов во всю ширину: главный блок экрана, карточки стоят на ней
-const ZONE_GAP = 10, TRAY_H = 44, TRAY_S = 34, TRAY_STEP = 40, TRAY_PAD = 8;   // лоток: отступ от заказов, высота, место, шаг мест, поля
+const ZONE_GAP = 10, TRAY_H = 40, TRAY_S = 30, TRAY_STEP = 37, TRAY_PAD = 8;   // лоток-паз под заказами: отступ от полки, высота, место, шаг мест, поля
+const POCKET_STEP = 26, POCKET_R = 11, POCKET_PAD = 8, POCKET_GAP = 10;        // лоток-карман в правом краю полки (лунки 2×2): шаг и радиус лунок, поля, отступ от заказов
+const CRATE_W = 62;                                                   // место под счётчик ящиков в левом краю полки (при лотке-кармане)
 const TOP_GAP = 16, BOTTOM_PAD = 18;                                  // зазор между лотком и полем; поле под рамкой
 function geo(){
-  const s = G.s, avail = H - 8, head = BAND_H + ZONE_GAP + TRAY_H + TOP_GAP;
+  const s = G.s, avail = H - 8, head = BAND_H + (traySide() ? 0 : ZONE_GAP + TRAY_H) + TOP_GAP;   // у лотка-кармана своего ряда нет — поле крупнее
   const cell = Math.min((W - 24) / s.w, (avail - head - BOTTOM_PAD) / s.h, 80);
   const bw = cell * s.w, bh = cell * s.h, group = head + bh + BOTTOM_PAD;
   const top = 6 + Math.max(0, (avail - group) * 0.4), ox = (W - bw) / 2;
@@ -1355,7 +1361,7 @@ function readPalette(){
   const cs = getComputedStyle(document.documentElement), v = (n) => cs.getPropertyValue(n).trim();
   P = { board: v('--board'), slot: v('--slot'), tile: v('--tile'), shadow: v('--tile-shadow'), stone: v('--stone'), stoneDark: v('--stone-dark'),
     ink: v('--ink'), muted: v('--muted'), accent: v('--accent'), danger: v('--danger'), ok: v('--ok'), okBg: v('--ok-bg'),
-    paper: v('--paper'), paperShadow: v('--paper-shadow'), tray: v('--tray'), trayDark: v('--tray-dark'), trayHole: v('--tray-hole'), chip: v('--chip'), chipShadow: v('--chip-shadow'), pInk: v('--panel-ink'), pMuted: v('--panel-muted'), pSlot: v('--panel-slot'), honey: v('--honey'), wood: v('--wood'), woodDark: v('--wood-dark'), steel: v('--steel'),
+    paper: v('--paper'), paperShadow: v('--paper-shadow'), tray: v('--tray'), chip: v('--chip'), chipShadow: v('--chip-shadow'), pInk: v('--panel-ink'), pMuted: v('--panel-muted'), pSlot: v('--panel-slot'), honey: v('--honey'), wood: v('--wood'), woodDark: v('--wood-dark'), steel: v('--steel'),
     colors: [v('--c0'), v('--c1'), v('--c2'), v('--c3'), v('--c4'), v('--accent')] };
 }
 readPalette();
@@ -1610,8 +1616,9 @@ function ordersLayout(g, own){
   let total = nextW, cnt = nextW ? 1 : 0;
   for (const n of ns) if (n){ total += n * CHIP_STEP + CARD_PAD; cnt++; }
   total += ORD_GAP * Math.max(0, cnt - 1);
-  const room = g.pw - 2 * BAND_PAD - 6, f = total > room ? room / total : 1, out = { f, cards: [], next: null };
-  let x = W / 2 - total * f / 2;
+  const side = traySide(), right = side ? trayRect(g).w + POCKET_GAP : 0, left = side && s.crateGoal ? CRATE_W : 0;   // карман справа и ящики слева отъедают место у заказов
+  const room = g.pw - 2 * BAND_PAD - 6 - right - left, f = total > room ? room / total : 1, out = { f, cards: [], next: null };
+  let x = g.px + left + (g.pw - right - left) / 2 - total * f / 2;
   for (const n of ns){
     if (!n){ out.cards.push(null); continue; }
     const w = (n * CHIP_STEP + CARD_PAD) * f; out.cards.push({ x, y: g.py + BAND_PAD, w, h: ORD_H }); x += w + ORD_GAP * f;
@@ -1621,9 +1628,18 @@ function ordersLayout(g, own){
 }
 function cardRect(a, g, n){ return ordersLayout(g, n ? { slot: a, n } : null).cards[a] || { x: W / 2, y: g.py + BAND_PAD, w: 0, h: ORD_H }; }
 function orderSlotXY(a, k, n, g){ const L = ordersLayout(g, { slot: a, n }), r = L.cards[a], step = CHIP_STEP * L.f; return { x: r.x + r.w / 2 - step * (n - 1) / 2 + step * k, y: r.y + r.h / 2, r: CHIP_R * L.f }; }
-// Лоток — отдельная зона по центру под всем рядом заказов: он общий запас, а не часть какой-то одной карточки.
-function trayRect(g){ const w = TRAY_PAD * 2 + TRAY_STEP * (G.s.cap - 1) + TRAY_S; return { x: W / 2 - w / 2, y: g.trayY, w, h: TRAY_H }; }
-function trayXY(k, g){ const r = trayRect(g); return { x: r.x + TRAY_PAD + TRAY_S / 2 + TRAY_STEP * k, y: g.trayY + TRAY_H / 2, r: TRAY_S / 2 - 2 }; }
+// Лоток — общий запас, тихий по умолчанию: утопленный паз в тонах поля, цвет появляется только как предупреждение.
+// Два вида на сравнение (сейв tray, кнопка в меню, ?tray=groove|side): паз по центру под полкой заказов или карман 2×2 в правом краю полки.
+function traySide(){ return G.save.tray === 'side'; }
+function trayRect(g){
+  if (traySide()){ const w = POCKET_STEP + 2 * POCKET_R + 2 * POCKET_PAD; return { x: g.px + g.pw - BAND_PAD - w, y: g.py + BAND_PAD, w, h: ORD_H }; }
+  const w = TRAY_PAD * 2 + TRAY_STEP * (G.s.cap - 1) + TRAY_S; return { x: W / 2 - w / 2, y: g.trayY, w, h: TRAY_H };
+}
+function trayXY(k, g){
+  const r = trayRect(g);
+  if (traySide()){ const col = k % 2, row = (k - col) / 2, rows = Math.ceil(G.s.cap / 2); return { x: r.x + POCKET_PAD + POCKET_R + col * POCKET_STEP, y: r.y + r.h / 2 + (row - (rows - 1) / 2) * POCKET_STEP, r: POCKET_R }; }
+  return { x: r.x + TRAY_PAD + TRAY_S / 2 + TRAY_STEP * k, y: r.y + r.h / 2, r: TRAY_S / 2 - 2 };
+}
 // Плавный сдвиг по горизонтали: карточка едет к новому месту ORDER_SHIFT_MS, а не прыгает (время абсолютное).
 function easeX(key, target, now){
   const d = CFG.ORDER_SHIFT_MS / G.timeScale, e = G.ordX[key];
@@ -1631,7 +1647,7 @@ function easeX(key, target, now){
   if (e.to !== target){ e.from = e.from + (e.to - e.from) * ease((now - e.t0) / d); e.to = target; e.t0 = now; }
   return e.from + (e.to - e.from) * ease((now - e.t0) / d);
 }
-function crateChipXY(g){ return { x: g.px + g.pw - 64, y: g.trayY + TRAY_H / 2, r: 13 }; }
+function crateChipXY(g){ return traySide() ? { x: g.px + BAND_PAD + 16, y: g.py + BAND_H / 2, r: 12 } : { x: g.px + g.pw - 64, y: g.trayY + TRAY_H / 2, r: 13 }; }
 // Куда летит собранная фигура (target из ядра): место в заказе, место в лотке, «не влезла» — за край лотка, «мимо» — вверх.
 function targetXY(T, g){
   if (T.kind === 'order') return orderSlotXY(T.slot, T.k, T.n, g);
@@ -1705,18 +1721,20 @@ function drawOrders(c, g, now, hl){
     else { c.textAlign = 'left'; c.textBaseline = 'middle'; c.font = '800 15px system-ui, sans-serif'; c.fillStyle = P.ink; c.fillText(V.crates + '/' + s.crateGoal, p.x + p.r + 6, p.y + 1); c.textBaseline = 'alphabetic'; }
   }
 }
-// Лоток по центру под рядом заказов: янтарный корпус, cap лунок — общий запас для всех заказов. Полный лоток пульсирует красным.
-// Пока тянешь плитку: kind === 'tray' — подсвечена лунка, куда ляжет лишняя фигура; kind === 'over' — лоток краснеет: не влезет.
+// Лоток: утопленный паз (тёмное дно, лунки-ямки), яркие в нём только фишки. Цвет — сигнал: осталось одно место — янтарная кромка,
+// полон — пульсирует красным. Пока тянешь плитку: kind === 'tray' — подсвечена лунка, куда ляжет лишняя фигура;
+// kind === 'over' — лоток краснеет: не влезет.
 function drawTray(c, g, now, kind){
-  const s = G.s, V = G.view, n = V.tray.length, r = trayRect(g);
+  const s = G.s, V = G.view, n = V.tray.length, r = trayRect(g), side = traySide();
   const flash = G.trayFlash && now >= G.trayFlash && now < G.trayFlash + 700, hot = n >= s.cap || flash || kind === 'over';
   const beat = hot ? 0.5 + 0.5 * Math.sin(now / (kind === 'over' || flash ? 60 : 170)) : 0;
-  c.fillStyle = P.trayDark; rr(c, r.x, r.y + 3, r.w, r.h, 14); c.fill();
-  c.fillStyle = P.tray; rr(c, r.x, r.y, r.w, r.h, 14); c.fill();
-  if (hot){ c.save(); c.globalAlpha = 0.3 + 0.55 * beat; c.fillStyle = P.danger; rr(c, r.x, r.y, r.w, r.h, 14); c.fill(); c.restore(); }
+  c.fillStyle = P.shadow; rr(c, r.x, r.y, r.w, r.h, 13); c.fill();
+  if (!side){ c.fillStyle = P.board; rr(c, r.x, r.y + 3, r.w, r.h - 3, 13); c.fill(); }      // паз на фоне: тёмная кромка сверху — «врезан»; карман в полке и так темнее её
+  if (hot){ c.save(); c.globalAlpha = 0.3 + 0.55 * beat; c.fillStyle = P.danger; rr(c, r.x, r.y, r.w, r.h, 13); c.fill(); c.restore(); }
+  else if (n === s.cap - 1){ c.save(); c.globalAlpha = 0.55 + 0.35 * Math.sin(now / 260); c.strokeStyle = P.tray; c.lineWidth = 2.5; rr(c, r.x + 1, r.y + 1, r.w - 2, r.h - 2, 13); c.stroke(); c.restore(); }
   for (let k = 0; k < s.cap; k++){
     const p = trayXY(k, g);
-    c.fillStyle = P.trayHole; c.beginPath(); c.arc(p.x, p.y, p.r + 1, 0, Math.PI * 2); c.fill();
+    c.fillStyle = P.chipShadow; c.beginPath(); c.arc(p.x, p.y, p.r + 1, 0, Math.PI * 2); c.fill();
     if (k < n){ const it = V.tray[k], pop = Math.max(0, 1 - (now - it.t) / 300); drawChip(c, it.color, p.x, p.y, p.r, 1 + 0.35 * pop); }
     else if (k === n && kind === 'tray'){
       c.save(); c.globalAlpha = 0.6 + 0.4 * Math.sin(now / 90); c.setLineDash([5, 4]); c.strokeStyle = '#fff'; c.lineWidth = 3; c.beginPath(); c.arc(p.x, p.y, p.r + 1, 0, Math.PI * 2); c.stroke(); c.restore();
@@ -1953,6 +1971,7 @@ window.POLOVINKI = {
   magnet(){ useBoost('magnet'); return this.state(); },                       // бустеры и «Продолжить» — те же вызовы, что у кнопок
   broom(){ useBoost('broom'); return this.state(); },
   revive(){ doRevive(); return this.state(); },
+  tray(v){ setTray(v); return G.save.tray; },                                   // вид лотка: 'groove' | 'side'
   boosts(n){ G.save.boost = { magnet: n, broom: n }; save(); hud(); return G.save.boost; },   // задать запас бустеров (для проверки заглушки рекламы — 0)
   bot(policy, delayMs){                                                         // автоигра ботом ядра: greedy | docker | novice
     const step = () => { if (!G.s || G.screen !== 'game' || isWin(G.s) || isLose(G.s)) return; const r = mulberry32(G.s.moves + 5);
@@ -1974,6 +1993,7 @@ window.POLOVINKI = {
 };
 
 // --- старт ---
+{ const q = /[?&]tray=(groove|side)/.exec(location.search); if (q) setTray(q[1]); }   // ?tray=side — сразу открыть нужный вид лотка
 fit(); hud();
 const startHash = location.hash.slice(1) === 'unlock' ? (setUnlockAll(true), 'menu') : location.hash.slice(1);
 if (startHash === 'game') startLevel(G.save.level); else goto(startHash || 'menu');
