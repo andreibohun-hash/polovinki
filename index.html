@@ -127,6 +127,7 @@ const CFG = {
   FLY_MS: 460,         // целая фигура летит в заказ или в лоток
   ORDER_DONE_MS: 320,  // закрытая карточка заказа празднует и уходит
   ORDER_IN_MS: 240,    // новая карточка заказа въезжает
+  ORDER_SHIFT_MS: 180, // карточки съезжаются, когда соседняя стала уже, шире или ушла
   UNTRAY_MS: 380,      // фигура летит из лотка в заказ
   MAGNET_MS: 340,      // магнит стягивает две половинки друг к другу
   BROOM_MS: 420,       // метла проходит по ряду
@@ -791,6 +792,7 @@ const G = {
   ending: 0,                     // когда показать win/lose; 0 — не ждём
   drag: null,                    // { cell, sx, sy, id, dir }
   levelT0: 0,                    // старт уровня (пульс панели цели)
+  ordX: {},                      // плавный сдвиг карточек заказов по горизонтали: ключ карточки → { from, to, t0 }
   handFor: null, handMove: -1, handT0: 0,   // рука на уроке: для какого состояния посчитана, какой ход, с какого момента едет
   cursor: 0, kbd: false,         // клавиатурный курсор (отладка на десктопе)
   timeScale: 1,
@@ -958,7 +960,7 @@ function clearFx(hard){
 function startLevel(li){
   li = Math.max(0, li);
   G.s = createState(li); G.s0 = G.s; G.hist = []; G.undoLeft = CFG.UNDO_PER_LEVEL; G.par = null;
-  G.ending = 0; G.drag = null; G.winT = 0; G.revived = false; snapView(); clearFx(true); G.levelT0 = performance.now(); G.lastInputT = G.levelT0; G.hintFor = null;
+  G.ending = 0; G.drag = null; G.winT = 0; G.revived = false; G.ordX = {}; snapView(); clearFx(true); G.levelT0 = performance.now(); G.lastInputT = G.levelT0; G.hintFor = null;
   Audio.intro(); log('fx.start', 'intro'); G.fxOpen.push({ name: 'intro', t1: G.levelT0 + CFG.INTRO_MS + CFG.INTRO_STEP * 12 });
   G.cursor = G.s.grid.findIndex(c => c > 0);
   const spec = levelSpec(li);
@@ -1272,9 +1274,10 @@ const cv = $('cv'), ctx = cv.getContext('2d');
 const VW = 400;                                    // виртуальная ширина; логика и раскладка в виртуальных юнитах (§2)
 let scale = 1, W = VW, H = 600, DPR = 1;
 function toVirtual(e){ const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) / scale, y: (e.clientY - r.top) / scale }; }
-// Раскладка сверху вниз: открытые заказы и маленькая карточка следующего, под ними лоток, ниже поле. Группа по центру с уклоном вверх.
-const ORD_H = 62, ORD_GAP = 8, ORD_MAX_W = 160, NEXT_W = 66;         // карточки заказов: высота, зазор, предел ширины; ширина карточки «следующий»
-const ZONE_GAP = 9, TRAY_H = 46, TRAY_S = 34, TRAY_STEP = 40, TRAY_PAD = 8;   // лоток: отступ от заказов, высота, место, шаг мест, поля
+// Раскладка сверху вниз: ряд заказов (плотная группа по центру), под ним по центру лоток, ниже поле. Группа по центру с уклоном вверх.
+const ORD_H = 46, ORD_GAP = 8, CHIP_R = 15, CHIP_STEP = 36, CARD_PAD = 14;   // карточка заказа облегает свои фишки: высота, зазор, радиус и шаг фишек, поля
+const NEXT_H = 30, NEXT_STEP = 16, NEXT_PAD = 14;                    // маленькая карточка «следующий заказ»: высота, шаг фигур, поля
+const ZONE_GAP = 10, TRAY_H = 44, TRAY_S = 34, TRAY_STEP = 40, TRAY_PAD = 8;   // лоток: отступ от заказов, высота, место, шаг мест, поля
 const TOP_GAP = 16, BOTTOM_PAD = 18;                                  // зазор между лотком и полем; поле под рамкой
 function geo(){
   const s = G.s, avail = H - 8, head = ORD_H + ZONE_GAP + TRAY_H + TOP_GAP;
@@ -1581,12 +1584,37 @@ const ease = (u) => u < 0 ? 0 : u > 1 ? 1 : 1 - (1 - u) * (1 - u);
 const easeIO = (u) => u < 0 ? 0 : u > 1 ? 1 : u * u * (3 - 2 * u);
 
 function plural(n, one, few, many){ const a = n % 10, b = n % 100; return a === 1 && b !== 11 ? one : a >= 2 && a <= 4 && (b < 12 || b > 14) ? few : many; }
-// Геометрия заказов и лотка: карточка заказа a из show, место k из n в карточке, карточка «следующий заказ», лоток и место k в нём.
-function cardRect(a, g){ const n = G.s.show, room = g.pw - NEXT_W - ORD_GAP, w = Math.min(ORD_MAX_W, (room - ORD_GAP * (n - 1)) / n); return { x: g.px + a * (w + ORD_GAP), y: g.py, w, h: ORD_H }; }
-function orderSlotXY(a, k, n, g){ const r = cardRect(a, g), step = Math.min(42, (r.w - 14) / n), x0 = r.x + r.w / 2 - step * (n - 1) / 2; return { x: x0 + step * k, y: r.y + r.h / 2, r: Math.min(17, step * 0.42) }; }
-function nextRect(g){ const last = cardRect(G.s.show - 1, g); return { x: last.x + last.w + ORD_GAP, y: g.py + 9, w: NEXT_W, h: ORD_H - 18 }; }   // вплотную за последней открытой карточкой: очередь читается слева направо
-function trayRect(g){ return { x: g.px, y: g.trayY, w: TRAY_PAD * 2 + TRAY_STEP * (G.s.cap - 1) + TRAY_S, h: TRAY_H }; }
-function trayXY(k, g){ return { x: g.px + TRAY_PAD + TRAY_S / 2 + TRAY_STEP * k, y: g.trayY + TRAY_H / 2, r: TRAY_S / 2 - 2 }; }
+// Ряд заказов. Карточка облегает свои фишки (большой плашки с одной фигурой посередине нет); открытые карточки и маленькая
+// карточка следующего заказа стоят плотной группой по центру экрана. Три больших заказа не помещаются — группа ужимается целиком (f).
+// own = { slot, n }: считать, что в месте slot стоит заказ на n фигур — для полёта в заказ, которого на экране ещё нет.
+function ordersLayout(g, own){
+  const s = G.s, V = G.view, ns = [];
+  for (let a = 0; a < s.show; a++){ const c = V.cards[a]; ns.push(own && own.slot === a ? own.n : c ? c.c.length : 0); }
+  const nx = s.queue[V.oi], nextW = nx ? nx.length * NEXT_STEP + NEXT_PAD : 0;
+  let total = nextW, cnt = nextW ? 1 : 0;
+  for (const n of ns) if (n){ total += n * CHIP_STEP + CARD_PAD; cnt++; }
+  total += ORD_GAP * Math.max(0, cnt - 1);
+  const f = total > g.pw ? g.pw / total : 1, out = { f, cards: [], next: null };
+  let x = W / 2 - total * f / 2;
+  for (const n of ns){
+    if (!n){ out.cards.push(null); continue; }
+    const w = (n * CHIP_STEP + CARD_PAD) * f; out.cards.push({ x, y: g.py, w, h: ORD_H }); x += w + ORD_GAP * f;
+  }
+  if (nextW) out.next = { x, y: g.py + (ORD_H - NEXT_H) / 2, w: nextW * f, h: NEXT_H };
+  return out;
+}
+function cardRect(a, g, n){ return ordersLayout(g, n ? { slot: a, n } : null).cards[a] || { x: W / 2, y: g.py, w: 0, h: ORD_H }; }
+function orderSlotXY(a, k, n, g){ const L = ordersLayout(g, { slot: a, n }), r = L.cards[a], step = CHIP_STEP * L.f; return { x: r.x + r.w / 2 - step * (n - 1) / 2 + step * k, y: r.y + r.h / 2, r: CHIP_R * L.f }; }
+// Лоток — отдельная зона по центру под всем рядом заказов: он общий запас, а не часть какой-то одной карточки.
+function trayRect(g){ const w = TRAY_PAD * 2 + TRAY_STEP * (G.s.cap - 1) + TRAY_S; return { x: W / 2 - w / 2, y: g.trayY, w, h: TRAY_H }; }
+function trayXY(k, g){ const r = trayRect(g); return { x: r.x + TRAY_PAD + TRAY_S / 2 + TRAY_STEP * k, y: g.trayY + TRAY_H / 2, r: TRAY_S / 2 - 2 }; }
+// Плавный сдвиг по горизонтали: карточка едет к новому месту ORDER_SHIFT_MS, а не прыгает (время абсолютное).
+function easeX(key, target, now){
+  const d = CFG.ORDER_SHIFT_MS / G.timeScale, e = G.ordX[key];
+  if (!e){ G.ordX[key] = { from: target, to: target, t0: now }; return target; }
+  if (e.to !== target){ e.from = e.from + (e.to - e.from) * ease((now - e.t0) / d); e.to = target; e.t0 = now; }
+  return e.from + (e.to - e.from) * ease((now - e.t0) / d);
+}
 function crateChipXY(g){ return { x: g.px + g.pw - 64, y: g.trayY + TRAY_H / 2, r: 13 }; }
 // Куда летит собранная фигура (target из ядра): место в заказе, место в лотке, «не влезла» — за край лотка, «мимо» — вверх.
 function targetXY(T, g){
@@ -1608,47 +1636,48 @@ function drawCheckBadge(c, x, y, r){
   c.save(); c.strokeStyle = '#fff'; c.lineWidth = r * 0.42; c.lineCap = 'round'; c.lineJoin = 'round';
   c.beginPath(); c.moveTo(x - r * 0.48, y + r * 0.02); c.lineTo(x - r * 0.12, y + r * 0.38); c.lineTo(x + r * 0.5, y - r * 0.34); c.stroke(); c.restore();
 }
-// Заказы: открытые — «бумажные» карточки; пустое место — лунка с бледной фигурой в пунктире, закрытое — фишка с галочкой.
-// Справа маленькая карточка — следующий заказ из очереди (под него можно запасать лоток), на ней число заказов после него.
-// hl — место, куда попадёт фигура, если отпустить плитку сейчас (target из ядра): оно пульсирует, пока тянешь.
+// Заказы: открытые — небольшие «бумажные» карточки по размеру своих фишек; пустое место — лунка с бледной фигурой в пунктире,
+// закрытое — фишка с галочкой. Следом маленькая карточка — следующий заказ из очереди (под него можно запасать лоток),
+// на ней число заказов после него. hl — место, куда попадёт фигура, если отпустить плитку сейчас (target из ядра): оно пульсирует.
 // На старте уровня карточки трижды пульсируют, чтобы взгляд нашёл цель.
 function drawOrders(c, g, now, hl){
-  const s = G.s, V = G.view, ts = G.timeScale;
+  const s = G.s, V = G.view, ts = G.timeScale, L = ordersLayout(g), step = CHIP_STEP * L.f, cr = CHIP_R * L.f;
   const intro = now < G.levelT0 + 1300 ? Math.max(0, Math.sin((now - G.levelT0) / 1300 * Math.PI * 3)) : 0;
   for (let a = 0; a < s.show; a++){
-    const r = cardRect(a, g), card = V.cards[a], cx = r.x + r.w / 2, cy = r.y + r.h / 2;
-    if (!card) continue;                                         // очередь кончилась — пустое место не рисуем, чтобы не казалось, что там что-то ждут
-    let k = 1 + 0.05 * intro;
-    if (card.done) k = 1 + 0.12 * Math.sin(Math.min(1, (now - card.done) / (CFG.ORDER_DONE_MS / ts)) * Math.PI);
+    const card = V.cards[a], r = L.cards[a];
+    if (!card || !r) continue;                                   // очередь кончилась — пустое место не рисуем
+    const x = easeX('c' + card.id, r.x, now), cx = x + r.w / 2, cy = r.y + r.h / 2, n = card.c.length;
+    let k = 1 + 0.06 * intro;
+    if (card.done) k = 1 + 0.14 * Math.sin(Math.min(1, (now - card.done) / (CFG.ORDER_DONE_MS / ts)) * Math.PI);
     else if (card.born && now < card.born + CFG.ORDER_IN_MS / ts) k = 0.55 + 0.45 * backOut((now - card.born) / (CFG.ORDER_IN_MS / ts));
     c.save(); c.translate(cx, cy); c.scale(k, k); c.translate(-cx, -cy);
-    c.fillStyle = P.paperShadow; rr(c, r.x, r.y + 3, r.w, r.h, 14); c.fill();
-    c.fillStyle = card.done ? P.okBg : P.paper; rr(c, r.x, r.y, r.w, r.h, 14); c.fill();
-    if (card.done || intro){ c.save(); c.globalAlpha = card.done ? 1 : intro; c.strokeStyle = card.done ? P.ok : P.accent; c.lineWidth = 3; rr(c, r.x, r.y, r.w, r.h, 14); c.stroke(); c.restore(); }
+    c.fillStyle = P.paperShadow; rr(c, x, r.y + 3, r.w, r.h, 14); c.fill();
+    c.fillStyle = card.done ? P.okBg : P.paper; rr(c, x, r.y, r.w, r.h, 14); c.fill();
+    if (card.done || intro){ c.save(); c.globalAlpha = card.done ? 1 : intro; c.strokeStyle = card.done ? P.ok : P.accent; c.lineWidth = 3; rr(c, x, r.y, r.w, r.h, 14); c.stroke(); c.restore(); }
     card.c.forEach((col, i) => {
-      const p = orderSlotXY(a, i, card.c.length, g);
+      const px = cx - step * (n - 1) / 2 + step * i;
       if (card.f[i]){
         const pop = Math.max(0, 1 - (now - card.pop[i]) / 300);
-        drawChip(c, col, p.x, p.y, p.r, 1 + 0.35 * pop); drawCheckBadge(c, p.x + p.r * 0.72, p.y + p.r * 0.72, p.r * 0.38);
+        drawChip(c, col, px, cy, cr, 1 + 0.35 * pop); drawCheckBadge(c, px + cr * 0.72, cy + cr * 0.72, cr * 0.4);
         return;
       }
-      c.fillStyle = P.pSlot; c.beginPath(); c.arc(p.x, p.y, p.r, 0, Math.PI * 2); c.fill();
-      c.save(); c.globalAlpha = 0.5; drawShape(c, col, p.x, p.y, p.r * 0.62); c.restore();
-      c.save(); c.setLineDash([3, 3]); c.strokeStyle = P.pMuted; c.lineWidth = 1.5; c.beginPath(); c.arc(p.x, p.y, p.r, 0, Math.PI * 2); c.stroke(); c.restore();
+      c.fillStyle = P.pSlot; c.beginPath(); c.arc(px, cy, cr, 0, Math.PI * 2); c.fill();
+      c.save(); c.globalAlpha = 0.55; drawShape(c, col, px, cy, cr * 0.66); c.restore();
+      c.save(); c.setLineDash([3, 3]); c.strokeStyle = P.pMuted; c.lineWidth = 1.5; c.beginPath(); c.arc(px, cy, cr, 0, Math.PI * 2); c.stroke(); c.restore();
       if (hl && hl.slot === a && hl.k === i && hl.id === card.id){
-        c.save(); c.globalAlpha = 0.6 + 0.4 * Math.sin(now / 90); c.strokeStyle = P.accent; c.lineWidth = 3.5; c.beginPath(); c.arc(p.x, p.y, p.r + 3, 0, Math.PI * 2); c.stroke(); c.restore();
+        c.save(); c.globalAlpha = 0.6 + 0.4 * Math.sin(now / 90); c.strokeStyle = P.accent; c.lineWidth = 3.5; c.beginPath(); c.arc(px, cy, cr + 3, 0, Math.PI * 2); c.stroke(); c.restore();
       }
     });
     c.restore();
   }
   const nx = s.queue[V.oi];
-  if (nx){
-    const r = nextRect(g), more = s.queue.length - V.oi - 1, step = Math.min(18, (r.w - 12) / nx.length), x0 = r.x + r.w / 2 - step * (nx.length - 1) / 2;
-    c.save(); c.globalAlpha = 0.72; c.fillStyle = P.paper; rr(c, r.x, r.y, r.w, r.h, 11); c.fill(); c.restore();
-    nx.forEach((col, k) => drawShape(c, col, x0 + step * k, r.y + r.h / 2, Math.min(8, step * 0.46)));
+  if (nx && L.next){
+    const r = L.next, x = easeX('n' + V.oi, r.x, now), more = s.queue.length - V.oi - 1, st = NEXT_STEP * L.f, x0 = x + r.w / 2 - st * (nx.length - 1) / 2;
+    c.save(); c.globalAlpha = 0.72; c.fillStyle = P.paper; rr(c, x, r.y, r.w, r.h, 10); c.fill(); c.restore();
+    nx.forEach((col, k) => drawShape(c, col, x0 + st * k, r.y + r.h / 2, 6.5 * L.f));
     if (more > 0){
-      c.fillStyle = P.accent; c.beginPath(); c.arc(r.x + r.w - 5, r.y + 2, 11, 0, Math.PI * 2); c.fill();
-      c.fillStyle = '#fff'; c.font = '800 11px system-ui, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText('+' + more, r.x + r.w - 5, r.y + 2.5); c.textBaseline = 'alphabetic';
+      c.fillStyle = P.accent; c.beginPath(); c.arc(x + r.w - 2, r.y, 10, 0, Math.PI * 2); c.fill();
+      c.fillStyle = '#fff'; c.font = '800 11px system-ui, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText('+' + more, x + r.w - 2, r.y + 0.5); c.textBaseline = 'alphabetic';
     }
   }
   if (s.crateGoal){
@@ -1658,13 +1687,12 @@ function drawOrders(c, g, now, hl){
     else { c.textAlign = 'left'; c.textBaseline = 'middle'; c.font = '800 15px system-ui, sans-serif'; c.fillStyle = P.ink; c.fillText(V.crates + '/' + s.crateGoal, p.x + p.r + 6, p.y + 1); c.textBaseline = 'alphabetic'; }
   }
 }
-// Лоток прямо под заказами: янтарный корпус с носиком вверх (отдаёт фигуры в заказы), cap лунок. Полный лоток пульсирует красным.
+// Лоток по центру под рядом заказов: янтарный корпус, cap лунок — общий запас для всех заказов. Полный лоток пульсирует красным.
 // Пока тянешь плитку: kind === 'tray' — подсвечена лунка, куда ляжет лишняя фигура; kind === 'over' — лоток краснеет: не влезет.
 function drawTray(c, g, now, kind){
   const s = G.s, V = G.view, n = V.tray.length, r = trayRect(g);
   const flash = G.trayFlash && now >= G.trayFlash && now < G.trayFlash + 700, hot = n >= s.cap || flash || kind === 'over';
   const beat = hot ? 0.5 + 0.5 * Math.sin(now / (kind === 'over' || flash ? 60 : 170)) : 0;
-  c.fillStyle = P.tray; c.beginPath(); c.moveTo(r.x + 25, r.y - 8); c.lineTo(r.x + 36, r.y + 2); c.lineTo(r.x + 14, r.y + 2); c.closePath(); c.fill();
   c.fillStyle = P.trayDark; rr(c, r.x, r.y + 3, r.w, r.h, 14); c.fill();
   c.fillStyle = P.tray; rr(c, r.x, r.y, r.w, r.h, 14); c.fill();
   if (hot){ c.save(); c.globalAlpha = 0.3 + 0.55 * beat; c.fillStyle = P.danger; rr(c, r.x, r.y, r.w, r.h, 14); c.fill(); c.restore(); }
